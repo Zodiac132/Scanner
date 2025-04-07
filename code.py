@@ -1,1 +1,1 @@
-Skibidi test
+print("test")
