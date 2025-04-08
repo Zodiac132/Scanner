@@ -294,6 +294,10 @@ def handle_trigger():
         # Run processing in a separate thread
         thread = threading.Thread(target=process_screenshot_and_get_answer, daemon=True)
         thread.start()
+        # Release lock in the thread or handle it there? Releasing here might be too early.
+        # Let's release it within the target function after it's done. Modify process_screenshot_and_get_answer
+        # NO - release lock here immediately after starting thread. The lock is just to prevent *starting* multiple threads.
+        process_lock.release() # Release lock after thread is started
     else:
         # Already processing, ignore this trigger
         print(f"'{TRIGGER_KEY}' detected, but already processing. Please wait.")
@@ -394,11 +398,12 @@ def run_main_application():
         # Ensure the running flag is False so threads can see it
         running = False
 
-        # Release processing lock if held
+        # Release processing lock if held (Added check)
+        # Lock is acquired and released in handle_trigger now, so this might not be needed, but safe to leave
         if process_lock.locked():
-            print("Releasing process lock...")
+            print("Releasing process lock during final cleanup (should ideally be already released)...")
             try: process_lock.release()
-            except Exception as lock_err: print(f" - Warn: Error releasing lock: {lock_err}") # Don't crash on cleanup error
+            except Exception as lock_err: print(f" - Warn: Error releasing lock during cleanup: {lock_err}")
 
         # Wait briefly for background threads (like screenshot/AI) to notice 'running = False'
         print("Waiting briefly for background tasks...")
