@@ -1,1 +1,444 @@
 
+# mouse_method.py (Based on UTIL.py structure)
+# Takes a screenshot on trigger, asks AI for the location of the correct MC answer,
+# and moves the mouse cursor to that location.
+
+import sys
+import os
+import platform
+import subprocess
+import importlib
+import time
+import threading
+import signal
+import io
+import traceback
+import re # For parsing coordinates
+
+# --- Attempt to Import Core Libraries ---
+try:
+    import keyboard         # For triggering
+    import mss              # For screenshots
+    import mss.tools
+    from PIL import Image
+    import google.generativeai as genai
+    import google.api_core.exceptions
+    import pyautogui        # <<<--- NEW: For mouse control
+except ImportError as e:
+    print(f"Info: Initial import failed for '{e.name}'. Setup will attempt installation/verification.")
+    # Define placeholders only if essential for setup phase (less likely now)
+
+# --- Configuration ---
+# GOOGLE_API_KEY will be injected here by the checker script
+# GOOGLE_API_KEY = "YOUR_GOOGLE_API_KEY_HERE" # <<<--- CHECKER INJECTS HERE
+
+# Setup Config
+REQUIRED_LIBRARIES = [
+    "keyboard",
+    "mss",
+    "Pillow",         # Note: Imported as PIL
+    "google-generativeai",
+    "pyautogui",      # <<<--- NEW library requirement
+]
+
+# Main App Config
+TRIGGER_KEY = '='
+SUPPRESS_TRIGGER = True # Prevent '=' from being typed
+AI_MODEL_NAME = "gemini-1.5-flash-latest" # Flash is fast, but Pro might be better at coordinate tasks if Flash fails.
+
+# Mouse Movement Config
+MOUSE_MOVE_DURATION = 0.25 # Seconds for the mouse to move
+
+# --- State ---
+process_lock = threading.Lock()
+running = True # Flag for graceful shutdown
+
+# === SETUP FUNCTIONS (Largely similar to UTIL.py) ===
+
+def check_windows():
+    """Checks if running on Windows."""
+    print("--- Checking Operating System ---")
+    if platform.system() != "Windows":
+        print(f"ERROR: This script is designed ONLY for Windows. Detected OS: {platform.system()}. Exiting.")
+        return False
+    print("Operating System: Windows (OK).")
+    return True
+
+def check_python_version():
+    """Checks if Python 3.8+ is being used."""
+    print("\n--- Checking Python Version ---")
+    if sys.version_info < (3, 8):
+        print(f"ERROR: Python 3.8+ recommended. You are using {platform.python_version()}. Exiting.")
+        return False
+    print(f"Python version {platform.python_version()} is sufficient.")
+    return True
+
+def install_libraries():
+    """Verifies required libraries are installed (should have been done by launcher)."""
+    print("\n--- Verifying Required Libraries ---")
+    missing_libs = []
+    for lib in REQUIRED_LIBRARIES:
+        try:
+            import_name = lib
+            if lib == 'Pillow': import_name = 'PIL'
+            elif lib == 'google-generativeai': import_name = 'google.generativeai'
+            # pyautogui imports directly as pyautogui
+            spec = importlib.util.find_spec(import_name)
+            if spec is None:
+                 missing_libs.append(lib)
+                 print(f"- '{lib}' NOT FOUND.")
+            else:
+                 print(f"- '{lib}' found.")
+        except Exception as e:
+             print(f"  Warning: Error checking for library '{lib}': {e}")
+             if lib not in missing_libs: missing_libs.append(lib)
+
+    if not missing_libs:
+        print("All required libraries appear to be installed.")
+        # Final import check to be sure
+        try:
+            global keyboard, mss, mss_tools, Image, genai, google_api_core_exceptions, pyautogui
+            import keyboard
+            import mss
+            import mss.tools as mss_tools
+            from PIL import Image
+            import google.generativeai as genai
+            import google.api_core.exceptions as google_api_core_exceptions
+            import pyautogui # Import pyautogui globally
+            pyautogui.FAILSAFE = False # Disable failsafe for automated movement
+            print("Core libraries imported successfully.")
+            return True
+        except ImportError as e:
+             print(f"ERROR: Library '{e.name}' found but failed to import. Installation might be corrupted.", file=sys.stderr)
+             return False
+    else:
+        print(f"\nERROR: Required libraries are missing: {', '.join(missing_libs)}", file=sys.stderr)
+        print("The initial installation process via the launcher might have failed.", file=sys.stderr)
+        print("Please ensure the launcher ran correctly and check its console output.", file=sys.stderr)
+        return False
+
+# === MAIN APPLICATION FUNCTIONS ===
+
+# --- NEW: Function to move mouse ---
+def move_mouse_to_answer(box_coords, monitor_info):
+    """Moves the mouse cursor to the center of the provided bounding box."""
+    global running, pyautogui
+
+    if pyautogui is None:
+        print("ERROR: PyAutoGUI library not loaded. Cannot move mouse.", file=sys.stderr)
+        return False
+
+    if not box_coords or len(box_coords) != 4:
+        print("ERROR: Invalid coordinates received for mouse movement.", file=sys.stderr)
+        return False
+
+    try:
+        x_min, y_min, x_max, y_max = map(int, box_coords) # Ensure they are integers
+
+        # Calculate the center of the bounding box (relative to the screenshot)
+        center_x = (x_min + x_max) // 2
+        center_y = (y_min + y_max) // 2
+
+        # Calculate absolute screen coordinates by adding monitor offset
+        # monitor_info contains {'left': ..., 'top': ..., 'width': ..., 'height': ...}
+        absolute_x = monitor_info['left'] + center_x
+        absolute_y = monitor_info['top'] + center_y
+
+        print(f"Moving mouse to center of detected answer box: Screen Coords ({absolute_x}, {absolute_y})")
+        print(f" - Box: {box_coords}, Center (relative): ({center_x}, {center_y}), Monitor offset: ({monitor_info['left']}, {monitor_info['top']})")
+
+        # Move the mouse
+        pyautogui.moveTo(absolute_x, absolute_y, duration=MOUSE_MOVE_DURATION)
+
+        print("Mouse movement complete.")
+        return True
+
+    except Exception as e:
+        print(f"Error during mouse movement: {type(e).__name__}: {e}", file=sys.stderr)
+        print("Ensure the LAUNCHER script was run with sufficient permissions (Administrator often needed for mouse control).", file=sys.stderr)
+        traceback.print_exc(file=sys.stderr)
+        return False
+
+# --- MODIFIED: Function to get location from AI ---
+def get_answer_location_from_ai(pil_image):
+    """Sends image to Gemini, asks for the BOUNDING BOX of the correct answer."""
+    global running, genai, google_api_core_exceptions, GOOGLE_API_KEY
+
+    print(f"Asking AI ({AI_MODEL_NAME}) for answer location...")
+    if not running: return None
+
+    # --- Check if GOOGLE_API_KEY was injected ---
+    try:
+         if 'GOOGLE_API_KEY' not in globals() or not GOOGLE_API_KEY or GOOGLE_API_KEY == "YOUR_GOOGLE_API_KEY_HERE":
+             raise NameError("GOOGLE_API_KEY not defined or invalid")
+    except NameError:
+         print("\n!!! FATAL ERROR (Mouse Method): GOOGLE_API_KEY variable not found or invalid !!!", file=sys.stderr)
+         print("   This means the checker script failed to inject the key correctly.", file=sys.stderr)
+         return None
+
+    if genai is None or google_api_core_exceptions is None:
+        print("ERROR: Google AI library not loaded correctly.", file=sys.stderr)
+        return None
+
+    try:
+        # Ensure API is configured before creating model (done in run_main_application now)
+        model = genai.GenerativeModel(AI_MODEL_NAME)
+    except Exception as e:
+        print(f"ERROR: Failed to initialize Gemini model '{AI_MODEL_NAME}': {e}", file=sys.stderr)
+        return None
+
+    # --- NEW PROMPT focusing on coordinates ---
+    prompt = """
+Analyze the provided image containing a multiple-choice question.
+1. Carefully read the question and all the presented answer options (e.g., A, B, C, D...).
+2. Use your internal knowledge to determine the single best correct answer option.
+3. Identify the bounding box coordinates (top-left x, top-left y, bottom-right x, bottom-right y) for the *entire text* of that single correct answer option within the image. The coordinates must be integers relative to the image dimensions (origin 0,0 at top-left).
+4. Respond ONLY with the coordinates in the exact format: BOX=[xmin,ymin,xmax,ymax]
+   Example: BOX=[150,300,450,325]
+5. If you cannot confidently identify the correct answer, cannot read the text, or cannot determine the bounding box, respond ONLY with the single word: ERROR
+Do not provide the answer letter, explanation, reasoning, or any other text. Just the BOX=[...] format or the word ERROR.
+"""
+
+    try:
+        print(f" - Sending image prompt to Gemini for location...")
+        response = model.generate_content(
+            [prompt, pil_image],
+            generation_config=genai.types.GenerationConfig(temperature=0.0), # Low temp for predictable format
+            request_options={'timeout': 120} # Slightly longer timeout for potentially complex task
+        )
+
+        if not response.candidates:
+             print(f"ERROR: Gemini response was empty or blocked.", file=sys.stderr)
+             try: print(f"   Prompt Feedback: {response.prompt_feedback}", file=sys.stderr)
+             except Exception: pass
+             return None
+
+        ai_response_text = response.text.strip()
+        print(f"AI raw response: '{ai_response_text}'")
+
+        # --- Parse the response for BOX=[...] ---
+        match = re.search(r"BOX=\[(\d+),(\d+),(\d+),(\d+)\]", ai_response_text)
+        if match:
+            coords = [int(c) for c in match.groups()]
+            # Basic validation: ensure min < max
+            if coords[0] < coords[2] and coords[1] < coords[3]:
+                 print(f" - Extracted coordinates: {coords}")
+                 return coords
+            else:
+                 print(f" - Extracted coordinates invalid (min not less than max): {coords}")
+                 return None
+        elif "ERROR" in ai_response_text.upper(): # Check if AI explicitly said ERROR
+             print(" - AI responded with ERROR.")
+             return None
+        else:
+             print(f" - AI gave unexpected response format: '{ai_response_text}'")
+             return None
+
+    except google_api_core_exceptions.PermissionDenied as e:
+         print(f"ERROR querying Google Gemini API: Permission Denied. Check API key and permissions. {e}", file=sys.stderr)
+         return None
+    except google_api_core_exceptions.ResourceExhausted as e: print(f"ERROR Gemini API: Quota Exceeded. {e}", file=sys.stderr); return None
+    except google_api_core_exceptions.DeadlineExceeded as e: print(f"ERROR Gemini API: Timeout. {e}", file=sys.stderr); return None
+    except google_api_core_exceptions.InvalidArgument as e: print(f"ERROR Gemini API: Invalid Argument (Bad image/prompt?). {e}", file=sys.stderr); return None
+    except Exception as e:
+        print(f"Error during Gemini API call: {type(e).__name__}: {e}", file=sys.stderr)
+        traceback.print_exc(file=sys.stderr)
+        return None
+
+# --- MODIFIED: Process screenshot and move mouse ---
+def process_screenshot_and_move_mouse():
+    """Takes screenshot, asks AI for LOCATION, moves mouse."""
+    global running, mss, Image, process_lock # Added process_lock here for release
+    screenshot_pil_img = None
+    monitor_info = None # <<<--- Store monitor info
+    start_time = time.time()
+
+    # Check for libs
+    if mss is None or Image is None or pyautogui is None:
+        print("ERROR: mss, Pillow, or PyAutoGUI library not loaded.", file=sys.stderr)
+        if process_lock.locked(): process_lock.release() # Release lock on error
+        return
+    if keyboard is None:
+        print("ERROR: keyboard library not loaded.", file=sys.stderr)
+        if process_lock.locked(): process_lock.release()
+        return
+
+    try:
+        print("Taking screenshot...")
+        with mss.mss() as sct:
+            # Simple monitor selection (primary usually index 1, fallback 0)
+            monitor_index = 1 if len(sct.monitors) > 1 else 0
+            if not sct.monitors: print("FATAL: No monitors detected by mss.", file=sys.stderr); return
+            monitor_info = sct.monitors[monitor_index] # Store monitor details
+            print(f" - Using monitor {monitor_index}: {monitor_info}")
+            sct_img = sct.grab(monitor_info)
+            print(f" - Captured ({sct_img.width}x{sct_img.height}).")
+            screenshot_pil_img = Image.frombytes("RGB", sct_img.size, sct_img.bgra, "raw", "BGRX")
+            print(" - Image converted.")
+    except mss.ScreenShotError as e:
+         print(f"Error taking screenshot with mss: {e}", file=sys.stderr)
+         if process_lock.locked(): process_lock.release()
+         return
+    except Exception as e:
+         print(f"Error preparing screenshot: {e}", file=sys.stderr)
+         traceback.print_exc(file=sys.stderr)
+         if process_lock.locked(): process_lock.release()
+         return
+
+    if not running: print(" - Interrupted during screenshot."); if process_lock.locked(): process_lock.release(); return
+    if screenshot_pil_img is None: print(" - Screenshot failed."); if process_lock.locked(): process_lock.release(); return
+
+    # Get answer location from AI
+    coords = get_answer_location_from_ai(screenshot_pil_img) # Key check happens inside here
+
+    if not running: print(" - Interrupted after AI call."); if process_lock.locked(): process_lock.release(); return
+
+    # Move mouse if coordinates received
+    if coords and monitor_info:
+        move_mouse_to_answer(coords, monitor_info)
+    else:
+        print("No valid location received from AI to move mouse.")
+
+    print(f"Processing finished in {time.time() - start_time:.2f} seconds.")
+
+    # --- Release the lock ---
+    if process_lock.locked():
+        try:
+            process_lock.release()
+            print("Process lock released.")
+        except Exception as lock_err:
+            print(f" - Warn: Error releasing lock: {lock_err}")
+    # --- ---
+
+
+def handle_trigger():
+    """Called when trigger key is pressed."""
+    global running, process_lock
+    if not running: return
+    # Attempt to acquire lock without blocking
+    if process_lock.acquire(blocking=False):
+        print(f"\n'{TRIGGER_KEY}' detected. Starting screenshot analysis...")
+        # Run processing in a separate thread to keep listener responsive
+        # Pass the lock release responsibility to the thread function
+        thread = threading.Thread(target=process_screenshot_and_move_mouse, daemon=True)
+        thread.start()
+        # DO NOT release lock here, process_screenshot_and_move_mouse will do it
+    else:
+        # Already processing, ignore this trigger
+        print(f"'{TRIGGER_KEY}' detected, but already processing. Please wait.")
+
+def signal_handler(sig, frame):
+    """Handles Ctrl+C for graceful shutdown."""
+    global running
+    if running:
+        print("\nShutdown signal (Ctrl+C) received. Cleaning up...")
+        running = False
+
+# === MAIN EXECUTION BLOCK ===
+def run_main_application():
+    """Contains the main application logic after setup."""
+    global running, genai, GOOGLE_API_KEY, keyboard, pyautogui
+
+    print("\n--- Starting Gemini Mouse Mover MC Solver ---")
+
+    # --- Configure Google AI (using the *injected* key) ---
+    try:
+        if 'GOOGLE_API_KEY' not in globals() or not GOOGLE_API_KEY:
+             raise NameError("GOOGLE_API_KEY was not injected by the checker script.")
+        if genai is None: raise ImportError("Google GenAI lib not loaded.")
+        print(f"Configuring Google AI SDK...") # Don't print key
+        genai.configure(api_key=GOOGLE_API_KEY)
+        print("Google AI SDK configured.")
+    except NameError as e: print(f"!!! FATAL ERROR: {e} !!!", file=sys.stderr); return
+    except ImportError as e: print(f"ERROR: Failed to import Google AI library for config: {e}", file=sys.stderr); return
+    except Exception as e:
+        print(f"ERROR: Failed to configure Google AI SDK: {e}", file=sys.stderr)
+        if "API key not valid" in str(e): print("   >>> Injected API key seems invalid.", file=sys.stderr)
+        return
+
+    # --- Setup Signal Handler ---
+    signal.signal(signal.SIGINT, signal_handler)
+    print("\nCtrl+C handler set.")
+
+    # --- Setup Keyboard Listener ---
+    listener_success = False
+    try:
+        if keyboard is None: raise ImportError("'keyboard' library not loaded/available.")
+        if pyautogui is None: raise ImportError("'pyautogui' library not loaded/available.")
+
+        print("\n" + "*"*60)
+        print("WARNING: Attempting global keyboard listener & mouse control.")
+        print("         If the launcher was NOT run as Administrator, this may")
+        print(f"         FAIL silently. Trigger key ('{TRIGGER_KEY}') or mouse movement")
+        print("         may not work correctly.")
+        print("*"*60 + "\n")
+
+        print("Setting up keyboard listener...")
+        keyboard.add_hotkey(
+            TRIGGER_KEY,
+            handle_trigger,
+            trigger_on_release=False,
+            suppress=SUPPRESS_TRIGGER
+        )
+        print(f"Listener active (or attempted). Ready for '{TRIGGER_KEY}' key press.")
+        listener_success = True
+
+        # --- Main Loop ---
+        print("Entering main loop (waiting for trigger or Ctrl+C)...")
+        while running:
+            time.sleep(0.5) # Keep main thread alive
+
+    except ImportError as e:
+        print(f"\nERROR: Required library '{e.name}' is not available.", file=sys.stderr)
+        running = False
+    except Exception as e:
+        print(f"\nERROR during listener/mouse setup or main loop: {type(e).__name__}: {e}", file=sys.stderr)
+        if isinstance(e, OSError) or "permissions" in str(e).lower() or "Administrator" in str(e):
+             print("\n>>> FAILURE LIKELY DUE TO MISSING ADMIN PERMISSIONS (Keyboard/Mouse Hooks). <<<", file=sys.stderr)
+             print(">>> Please run the main LAUNCHER script as Administrator. <<<", file=sys.stderr)
+        else:
+             print("Traceback:", file=sys.stderr)
+             traceback.print_exc(file=sys.stderr)
+        running = False
+    finally:
+        # --- Cleanup ---
+        print("\n--- Script Stopping (Mouse Method) ---")
+        running = False # Ensure flag is set
+
+        # Release processing lock if held (should have been released by thread, but check just in case)
+        if process_lock.locked():
+            print("Releasing process lock during final cleanup...")
+            try: process_lock.release()
+            except Exception as lock_err: print(f" - Warn: Error releasing lock on exit: {lock_err}")
+
+        print("Waiting briefly for background tasks...")
+        time.sleep(0.5)
+
+        print("Cleaning up keyboard hooks (if setup succeeded)...")
+        if listener_success and keyboard:
+            try: keyboard.unhook_all() ; print("Keyboard hooks removed.")
+            except Exception as uh_e: print(f" - Warn: Error during keyboard unhooking: {uh_e}", file=sys.stderr)
+        elif not listener_success: print(" - Skipping keyboard unhooking (setup failed/interrupted).")
+        else: print(" - Skipping keyboard unhooking (library not loaded).")
+
+        print("Exiting Mouse Method script.")
+
+
+# --- Script Entry Point (`if __name__ == "__main__":`) ---
+if __name__ == "__main__":
+    print("="*50)
+    print("= Gemini Mouse Mover MC Solver (Mouse Method)  =")
+    print("="*50)
+
+    # === Phase 1: Setup Checks ===
+    if not check_windows(): sys.exit(1)
+    if not check_python_version(): sys.exit(1)
+    if not install_libraries(): # Verifies installation + imports globals
+        print("\nSetup failed: Required libraries check failed.", file=sys.stderr)
+        sys.exit(1)
+
+    print("\n--- Setup Phase Complete (Mouse Method) ---")
+
+    # === Phase 2: Run Main Application ===
+    # Checks for injected GOOGLE_API_KEY inside run_main_application
+    run_main_application()
