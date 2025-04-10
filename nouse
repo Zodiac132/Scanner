@@ -1,4 +1,4 @@
-# mouse_method.py (Based on UTIL.py structure) - CORRECTED
+# mouse_method.py (Based on UTIL.py structure) - CORRECTEDtest
 # Takes a screenshot on trigger, asks AI for the location of the correct MC answer,
 # and moves the mouse cursor to that location.
 
