@@ -1,5 +1,4 @@
-
-# mouse_method.py (Based on UTIL.py structure)
+# mouse_method.py (Based on UTIL.py structure) - CORRECTED
 # Takes a screenshot on trigger, asks AI for the location of the correct MC answer,
 # and moves the mouse cursor to that location.
 
@@ -140,7 +139,6 @@ def move_mouse_to_answer(box_coords, monitor_info):
         center_y = (y_min + y_max) // 2
 
         # Calculate absolute screen coordinates by adding monitor offset
-        # monitor_info contains {'left': ..., 'top': ..., 'width': ..., 'height': ...}
         absolute_x = monitor_info['left'] + center_x
         absolute_y = monitor_info['top'] + center_y
 
@@ -245,7 +243,7 @@ Do not provide the answer letter, explanation, reasoning, or any other text. Jus
         traceback.print_exc(file=sys.stderr)
         return None
 
-# --- MODIFIED: Process screenshot and move mouse ---
+# --- CORRECTED: Process screenshot and move mouse ---
 def process_screenshot_and_move_mouse():
     """Takes screenshot, asks AI for LOCATION, moves mouse."""
     global running, mss, Image, process_lock # Added process_lock here for release
@@ -253,61 +251,100 @@ def process_screenshot_and_move_mouse():
     monitor_info = None # <<<--- Store monitor info
     start_time = time.time()
 
-    # Check for libs
+    # Check for libs - release lock if libs are missing
     if mss is None or Image is None or pyautogui is None:
         print("ERROR: mss, Pillow, or PyAutoGUI library not loaded.", file=sys.stderr)
-        if process_lock.locked(): process_lock.release() # Release lock on error
+        if process_lock.locked():
+             try: process_lock.release(); print("Lock released due to missing libs.")
+             except RuntimeError: pass # Might not be owned by this thread if error happens early
         return
     if keyboard is None:
         print("ERROR: keyboard library not loaded.", file=sys.stderr)
-        if process_lock.locked(): process_lock.release()
+        if process_lock.locked():
+             try: process_lock.release(); print("Lock released due to missing keyboard lib.")
+             except RuntimeError: pass
         return
 
     try:
         print("Taking screenshot...")
         with mss.mss() as sct:
-            # Simple monitor selection (primary usually index 1, fallback 0)
             monitor_index = 1 if len(sct.monitors) > 1 else 0
-            if not sct.monitors: print("FATAL: No monitors detected by mss.", file=sys.stderr); return
-            monitor_info = sct.monitors[monitor_index] # Store monitor details
+            if not sct.monitors:
+                print("FATAL: No monitors detected by mss.", file=sys.stderr)
+                # Ensure lock release even on fatal error before return
+                if process_lock.locked():
+                    try: process_lock.release(); print("Lock released due to no monitors.")
+                    except RuntimeError: pass
+                return # Exit if no monitors
+            monitor_info = sct.monitors[monitor_index]
             print(f" - Using monitor {monitor_index}: {monitor_info}")
             sct_img = sct.grab(monitor_info)
             print(f" - Captured ({sct_img.width}x{sct_img.height}).")
             screenshot_pil_img = Image.frombytes("RGB", sct_img.size, sct_img.bgra, "raw", "BGRX")
             print(" - Image converted.")
+
     except mss.ScreenShotError as e:
          print(f"Error taking screenshot with mss: {e}", file=sys.stderr)
-         if process_lock.locked(): process_lock.release()
-         return
+         if process_lock.locked(): # Check and release lock on this specific error
+             try: process_lock.release(); print("Lock released due to mss.ScreenShotError.")
+             except RuntimeError: pass
+         return # Exit after releasing lock
+
     except Exception as e:
          print(f"Error preparing screenshot: {e}", file=sys.stderr)
          traceback.print_exc(file=sys.stderr)
-         if process_lock.locked(): process_lock.release()
-         return
+         if process_lock.locked(): # Check and release lock on general screenshot error
+             try: process_lock.release(); print("Lock released due to general screenshot error.")
+             except RuntimeError: pass
+         return # Exit after releasing lock
 
-    if not running: print(" - Interrupted during screenshot."); if process_lock.locked(): process_lock.release(); return
-    if screenshot_pil_img is None: print(" - Screenshot failed."); if process_lock.locked(): process_lock.release(); return
+    # Check if script was stopped *during* screenshot operations
+    if not running:
+        print(" - Interrupted during screenshot processing.")
+        if process_lock.locked(): # Check and release lock if interrupted
+            try: process_lock.release(); print("Lock released due to interruption during screenshot.")
+            except RuntimeError: pass
+        return # Exit if interrupted
 
-    # Get answer location from AI
+    # Check if screenshot failed for other reasons (e.g., conversion)
+    if screenshot_pil_img is None:
+        print(" - Screenshot failed (PIL image is None).")
+        if process_lock.locked(): # Check and release lock if screenshot obj is None
+            try: process_lock.release(); print("Lock released due to failed screenshot (None).")
+            except RuntimeError: pass
+        return # Exit if no image
+
+    # --- AI Processing ---
     coords = get_answer_location_from_ai(screenshot_pil_img) # Key check happens inside here
 
-    if not running: print(" - Interrupted after AI call."); if process_lock.locked(): process_lock.release(); return
+    # Check if script was stopped *during* AI call
+    if not running:
+        print(" - Interrupted after AI call.")
+        if process_lock.locked(): # Check and release lock if interrupted
+             try: process_lock.release(); print("Lock released due to interruption after AI.")
+             except RuntimeError: pass
+        return # Exit if interrupted
 
-    # Move mouse if coordinates received
+    # --- Mouse Movement ---
     if coords and monitor_info:
         move_mouse_to_answer(coords, monitor_info)
+        # move_mouse_to_answer has its own error handling but doesn't release the lock
     else:
         print("No valid location received from AI to move mouse.")
 
     print(f"Processing finished in {time.time() - start_time:.2f} seconds.")
 
-    # --- Release the lock ---
+    # --- Final Lock Release (Primary exit path) ---
     if process_lock.locked():
         try:
             process_lock.release()
-            print("Process lock released.")
-        except Exception as lock_err:
-            print(f" - Warn: Error releasing lock: {lock_err}")
+            print("Process lock released at end of function.")
+        except RuntimeError as lock_err:
+             # This case (trying to release a lock not held) shouldn't happen here
+             # if the logic is correct, but we handle it defensively.
+             print(f" - Warn: Error releasing lock at end (already released?): {lock_err}")
+        except Exception as lock_err: # Catch other potential errors
+             print(f" - Warn: Unexpected error releasing lock at end: {lock_err}")
     # --- ---
 
 
