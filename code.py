@@ -1,5 +1,6 @@
 # UTIL.py (Source code for GitHub - WITHOUT Google API Key definition)
 # The checker script will inject the GOOGLE_API_KEY variable before running.
+# Version: Updated with lock fix
 
 import sys
 import os
@@ -14,18 +15,25 @@ import io
 import traceback # Keep traceback for debugging errors
 
 # --- Attempt to Import Core Libraries ---
+# Define placeholders initially in case imports fail but are needed later
+keyboard = None
+mss = None
+mss_tools = None
+Image = None
+genai = None
+google_api_core_exceptions = None
+
 try:
     import keyboard
     import mss
-    import mss.tools
+    import mss.tools as mss_tools # Alias for clarity if needed later
     from PIL import Image
     import google.generativeai as genai
-    import google.api_core.exceptions
+    import google.api_core.exceptions as google_api_core_exceptions
 except ImportError as e:
     # This message will appear if the .bat install failed or wasn't run
     print(f"Info: Initial import failed for '{e.name}'. Setup will attempt installation/verification.")
-    # Define placeholders only if essential for setup phase (less likely now)
-    # We rely on the install_libraries function to handle missing libs.
+    # Placeholders remain None if initial import fails
 
 # --- Configuration ---
 # GOOGLE_API_KEY will be injected here by the checker script if authentication succeeds
@@ -106,6 +114,7 @@ def install_libraries():
         print("All required libraries appear to be installed.")
         # Final import check to be sure
         try:
+            # Re-assign globals after verification confirms they *should* be importable
             global keyboard, mss, mss_tools, Image, genai, google_api_core_exceptions
             import keyboard
             import mss
@@ -128,8 +137,6 @@ def install_libraries():
 # --- configure_api_key function REMOVED ---
 
 # === MAIN APPLICATION FUNCTIONS ===
-# (signal_answer_with_capslock, get_answer_from_ai_knowledge,
-#  process_screenshot_and_get_answer, handle_trigger, signal_handler)
 
 def signal_answer_with_capslock(answer_letter):
     """Signals the answer letter using Caps Lock flashes."""
@@ -183,6 +190,10 @@ def get_answer_from_ai_knowledge(pil_image):
         return None
 
     try:
+        # Configure the generative model within the function using the verified key
+        # It's generally okay to re-configure if needed, or you could configure once globally
+        # if you ensure the key check happens *before* the global configuration.
+        # Let's keep the configure step in run_main_application for simplicity, assuming it succeeded.
         model = genai.GenerativeModel(AI_MODEL_NAME)
     except Exception as e:
         print(f"ERROR: Failed to initialize Gemini model '{AI_MODEL_NAME}': {e}", file=sys.stderr)
@@ -239,64 +250,102 @@ Do not provide any explanation, reasoning, calculations, or extra text. Just the
         traceback.print_exc(file=sys.stderr) # Print traceback for unexpected errors
         return None
 
+# --- MODIFIED: process_screenshot_and_get_answer handles the lock ---
 def process_screenshot_and_get_answer():
-    """Takes screenshot, asks AI KNOWLEDGE, signals answer."""
-    global running, mss, Image, keyboard # Ensure keyboard is accessible
-    screenshot_pil_img=None; start_time = time.time()
+    """Takes screenshot, asks AI KNOWLEDGE, signals answer. Handles process lock."""
+    global running, mss, Image, keyboard, process_lock # Ensure lock is accessible
 
-    # Check for libs
-    if mss is None or Image is None: print("ERROR: mss or Pillow library not loaded.", file=sys.stderr); return
-    if keyboard is None: print("ERROR: keyboard library not loaded.", file=sys.stderr); return
-
-    try:
-        print("Taking screenshot...")
-        with mss.mss() as sct:
-            # Simple monitor selection (primary usually index 1, fallback 0)
-            monitor = sct.monitors[1] if len(sct.monitors) > 1 else sct.monitors[0] if sct.monitors else None
-            if not monitor: print("FATAL: No monitors detected by mss.", file=sys.stderr); return
-            print(f" - Using monitor: {monitor}")
-            sct_img = sct.grab(monitor)
-            print(f" - Captured ({sct_img.width}x{sct_img.height}).")
-            screenshot_pil_img = Image.frombytes("RGB", sct_img.size, sct_img.bgra, "raw", "BGRX")
-            print(" - Image converted.")
-    except mss.ScreenShotError as e:
-         print(f"Error taking screenshot with mss: {e}", file=sys.stderr)
-         return
-    except Exception as e:
-         print(f"Error preparing screenshot: {e}", file=sys.stderr)
-         traceback.print_exc(file=sys.stderr)
-         return
-
-    if not running: print(" - Interrupted during screenshot."); return
-    if screenshot_pil_img is None: print(" - Screenshot failed."); return
-
-    # Get answer from AI
-    answer = get_answer_from_ai_knowledge(screenshot_pil_img) # Key check happens inside here
-
-    if not running: print(" - Interrupted after AI call."); return
-
-    # Signal if answer received
-    if answer:
-        signal_answer_with_capslock(answer)
+    # --- Acquire Lock ---
+    if not process_lock.acquire(blocking=False):
+        print("--> Process already running. Ignoring this trigger.")
+        return # Exit if another process is active
     else:
-        print("No valid answer received from AI to signal.")
+        print("--> Acquired process lock.") # Confirm lock acquired
 
-    print(f"Processing finished in {time.time() - start_time:.2f} seconds.")
+    try: # Use try...finally to ensure lock is released
+        if not running: return # Check running flag *after* acquiring lock
 
+        start_time = time.time()
+        screenshot_pil_img = None
 
+        # Check for libs
+        if mss is None or Image is None:
+            print("ERROR: mss or Pillow library not loaded.", file=sys.stderr)
+            return # Exit if libs missing (lock will be released in finally)
+        if keyboard is None:
+            print("ERROR: keyboard library not loaded.", file=sys.stderr)
+            return # Exit if libs missing (lock will be released in finally)
+
+        # --- Screenshotting ---
+        try:
+            print("Taking screenshot...")
+            with mss.mss() as sct:
+                monitor = sct.monitors[1] if len(sct.monitors) > 1 else sct.monitors[0] if sct.monitors else None
+                if not monitor:
+                    print("FATAL: No monitors detected by mss.", file=sys.stderr)
+                    return # Exit if no monitor (lock will be released in finally)
+                print(f" - Using monitor: {monitor}")
+                sct_img = sct.grab(monitor)
+                print(f" - Captured ({sct_img.width}x{sct_img.height}).")
+                screenshot_pil_img = Image.frombytes("RGB", sct_img.size, sct_img.bgra, "raw", "BGRX")
+                print(" - Image converted.")
+        except mss.ScreenShotError as e:
+             print(f"Error taking screenshot with mss: {e}", file=sys.stderr)
+             return # Exit on screenshot error (lock will be released in finally)
+        except Exception as e:
+             print(f"Error preparing screenshot: {e}", file=sys.stderr)
+             traceback.print_exc(file=sys.stderr)
+             return # Exit on other screenshot errors (lock will be released in finally)
+
+        if not running:
+            print(" - Interrupted during screenshot.")
+            return # Exit if shutdown signal received (lock will be released in finally)
+        if screenshot_pil_img is None:
+            print(" - Screenshot failed.")
+            return # Exit if screenshot failed (lock will be released in finally)
+
+        # --- AI Processing ---
+        answer = get_answer_from_ai_knowledge(screenshot_pil_img) # Key check happens inside here
+
+        if not running:
+            print(" - Interrupted after AI call.")
+            return # Exit if shutdown signal received (lock will be released in finally)
+
+        # --- Signaling ---
+        if answer:
+            signal_answer_with_capslock(answer)
+        else:
+            print("No valid answer received from AI to signal.")
+
+        print(f"Processing finished in {time.time() - start_time:.2f} seconds.")
+
+    finally:
+        # --- Release Lock ---
+        # This block executes whether the try block succeeded, failed, or returned early
+        print("--> Releasing process lock.")
+        try:
+            process_lock.release()
+        except threading.ThreadError:
+             # This can happen if release is called when the lock isn't held
+             # (e.g., if it failed to acquire initially - though our code returns early then)
+             # Or potentially if released twice (shouldn't happen with this structure).
+             print(" - Warning: Attempted to release an unacquired lock.", file=sys.stderr)
+        except Exception as e:
+             # Catch any other potential errors during release
+             print(f" - Warning: Error releasing lock: {e}", file=sys.stderr)
+
+# --- MODIFIED: handle_trigger just starts the thread ---
 def handle_trigger():
-    """Called when trigger key is pressed (if listener works)."""
-    global running, process_lock
+    """Called when trigger key is pressed (if listener works). Starts processing thread."""
+    global running
     if not running: return
-    # Attempt to acquire lock without blocking
-    if process_lock.acquire(blocking=False):
-        print(f"\n'{TRIGGER_KEY}' detected. Starting screenshot analysis...")
-        # Run processing in a separate thread
-        thread = threading.Thread(target=process_screenshot_and_get_answer, daemon=True)
-        thread.start()
-    else:
-        # Already processing, ignore this trigger
-        print(f"'{TRIGGER_KEY}' detected, but already processing. Please wait.")
+
+    # Lock handling is now done inside process_screenshot_and_get_answer
+    print(f"\n'{TRIGGER_KEY}' detected. Starting analysis thread...")
+    # Run processing in a separate thread
+    thread = threading.Thread(target=process_screenshot_and_get_answer, daemon=True)
+    thread.start()
+    # No lock acquisition/checking here anymore
 
 def signal_handler(sig, frame):
     """Handles Ctrl+C for graceful shutdown."""
@@ -304,7 +353,17 @@ def signal_handler(sig, frame):
     if running:
         print("\nShutdown signal (Ctrl+C) received. Cleaning up...")
         running = False
+        # Release lock *here* as well in case a process was running *during* Ctrl+C
+        # This is a safeguard, the finally block in the thread *should* handle it
+        if process_lock.locked():
+            print(" - Attempting to release lock held during shutdown signal...")
+            try:
+                process_lock.release()
+                print("   - Lock released by signal handler.")
+            except Exception as e:
+                 print(f"   - Warn: Error releasing lock in signal handler: {e}")
         # Allow main loop to exit naturally
+
 
 # === MAIN EXECUTION BLOCK ===
 def run_main_application():
@@ -392,13 +451,14 @@ def run_main_application():
              print("Exiting loop unexpectedly...")
 
         # Ensure the running flag is False so threads can see it
-        running = False
+        running = False # Explicitly set again
 
-        # Release processing lock if held
+        # Release processing lock if held (redundant if finally block in thread works, but safe)
+        # The signal handler might also try to release it.
         if process_lock.locked():
-            print("Releasing process lock...")
+            print("Releasing process lock during final cleanup (should have been released by thread)...")
             try: process_lock.release()
-            except Exception as lock_err: print(f" - Warn: Error releasing lock: {lock_err}") # Don't crash on cleanup error
+            except Exception as lock_err: print(f" - Warn: Error releasing lock during cleanup: {lock_err}") # Don't crash on cleanup error
 
         # Wait briefly for background threads (like screenshot/AI) to notice 'running = False'
         print("Waiting briefly for background tasks...")
