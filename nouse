@@ -1,4 +1,4 @@
-# mouse_method.py (or nouse.py) - v6 (Split print/while line)test
+# mouse_method.py (or nouse.py) - v7 (Split if/try/except line)
 # Takes a screenshot on trigger, asks AI for the location of the correct MC answer,
 # and moves the mouse cursor to that location.
 
@@ -18,6 +18,7 @@ try:
     import keyboard
     import mss
     import mss.tools
+    # Ensure PIL.Image is imported correctly
     from PIL import Image
     import google.generativeai as genai
     import google.api_core.exceptions
@@ -71,13 +72,12 @@ def install_libraries():
         try:
             global keyboard, mss, mss_tools, Image, genai, google_api_core_exceptions, pyautogui
             import keyboard, mss, mss.tools as mss_tools
-            # Ensure correct PIL import name
-            from PIL import Image
+            from PIL import Image # Correct import
             import google.generativeai as genai, google.api_core.exceptions as google_api_core_exceptions
             import pyautogui
             pyautogui.FAILSAFE = False; print(f"PyAutoGUI FAILSAFE={pyautogui.FAILSAFE}")
             print("Core libs imported."); return True
-        except Exception as e: print(f"ERROR: Final import failed: {e}", file=sys.stderr); return False
+        except Exception as e: print(f"ERROR: Final import failed: {e}", file=sys.stderr); traceback.print_exc(file=sys.stderr); return False
 
 # === MAIN APPLICATION FUNCTIONS ===
 
@@ -158,7 +158,6 @@ def process_screenshot_and_move_mouse():
                 if not sct.monitors: print("FATAL: No monitors detected.", file=sys.stderr); return
                 monitor_info = sct.monitors[monitor_index]; print(f"Using monitor {monitor_index}: {monitor_info}")
                 sct_img = sct.grab(monitor_info); print(f"Captured ({sct_img.width}x{sct_img.height}). Converting...")
-                # Ensure correct import name used here
                 screenshot_pil_img = Image.frombytes("RGB", sct_img.size, sct_img.bgra, "raw", "BGRX")
                 print("Screenshot converted.")
         except Exception as scr_e: screenshot_exception = scr_e; print(f"!!! ERROR during screenshot: {scr_e}", file=sys.stderr)
@@ -221,27 +220,38 @@ def run_main_application():
         keyboard.add_hotkey(TRIGGER_KEY, handle_trigger, trigger_on_release=False, suppress=SUPPRESS_TRIGGER)
         print("Listener active."); listener_success = True
 
-        # --- CORRECTED LINE ---
-        print("Entering main loop...") # Print statement on its own line
-        while running:                # While loop starts on the next line
-            time.sleep(0.5)           # Body of the loop
-        # --- END CORRECTION ---
-
-        print("Main loop exited.") # After the loop finishes or 'running' becomes False
+        print("Entering main loop...")
+        while running:
+            time.sleep(0.5)
+        print("Main loop exited.")
     except ImportError as e: # >>>>> EXCEPT (aligned with try) <<<<<<
         print(f"\n!!! ERROR: Lib '{e.name}' unavailable.", file=sys.stderr); running = False
     except Exception as e: # >>>>> EXCEPT (aligned with try) <<<<<<
         print(f"\n!!! ERROR listener/loop: {e} !!!", file=sys.stderr)
-        e_str=str(e).lower()
+        e_str=str(e).lower();
         if isinstance(e, OSError) or "permission" in e_str or "admin" in e_str: print(">>> Check Admin Privs! <<<", file=sys.stderr)
         else: traceback.print_exc(file=sys.stderr)
         running = False
     finally: # >>>>> FINALLY (aligned with try) <<<<<<
         print("\n--- Script Stopping: Cleaning Up ---")
         running = False # Ensure flag is set
-        if process_lock.locked(): print("Releasing process lock..."); try: process_lock.release() except Exception as lock_err: print(f"Warn: {lock_err}")
+
+        # --- CORRECTED LOCK RELEASE BLOCK ---
+        if process_lock.locked():
+            print("Releasing process lock during final cleanup...")
+            try:
+                process_lock.release()
+            except Exception as lock_err: # More specific error might be RuntimeError
+                print(f" - Warn: Error releasing lock on exit: {lock_err}")
+        # --- END CORRECTION ---
+
         print("Cleaning up kbd hooks...");
-        if listener_success and keyboard: try: keyboard.unhook_all(); print("Hooks removed.") except Exception as uh_e: print(f"Warn: {uh_e}", file=sys.stderr)
+        if listener_success and keyboard:
+            try:
+                keyboard.unhook_all()
+                print("Hooks removed.")
+            except Exception as uh_e:
+                print(f"Warn: {uh_e}", file=sys.stderr)
         else: print("Skipping kbd unhook.")
         print("--- Cleanup Complete ---")
 
