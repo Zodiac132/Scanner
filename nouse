@@ -1,6 +1,5 @@
-# mouse_method.py (or nouse.py) - v7 (Split if/try/except line)
-# Takes a screenshot on trigger, asks AI for the location of the correct MC answer,
-# and moves the mouse cursor to that location.
+# mouse_method.py (or nouse.py) - v8 (AI Text + Local OCR)
+# AI provides correct answer text, script uses easyocr to find it on screen.
 
 import sys
 import os
@@ -11,51 +10,87 @@ import threading
 import signal
 import io
 import traceback
-import re # For parsing coordinates
+import re # For parsing AI potentially, though less needed now
+import numpy as np # For image conversion for easyocr
 
 # --- Attempt to Import Core Libraries ---
 try:
     import keyboard
     import mss
     import mss.tools
-    # Ensure PIL.Image is imported correctly
     from PIL import Image
     import google.generativeai as genai
     import google.api_core.exceptions
     import pyautogui
+    import easyocr # <<<--- NEW OCR Library
 except ImportError as e:
     print(f"[Startup Info] Initial import check failed for '{e.name}'.")
-    keyboard = mss = Image = genai = google = pyautogui = None
+    keyboard = mss = Image = genai = google = pyautogui = easyocr = None
+    # numpy might be imported even if easyocr fails, handle None checks later
 
 # --- Configuration ---
 GOOGLE_API_KEY = "YOUR_GOOGLE_API_KEY_HERE" # <<<--- CHECKER INJECTS HERE
 
-REQUIRED_LIBRARIES = ["keyboard", "mss", "Pillow", "google-generativeai", "pyautogui"]
+REQUIRED_LIBRARIES = [
+    "keyboard", "mss", "Pillow", "google-generativeai", "pyautogui",
+    "numpy", "easyocr" # <<<--- NEW Dependencies
+]
 TRIGGER_KEY = '='
 SUPPRESS_TRIGGER = True
-AI_MODEL_NAME = "gemini-1.5-flash-latest"
+AI_MODEL_NAME = "gemini-1.5-flash-latest" # Flash is probably fine for text extraction
 # AI_MODEL_NAME = "gemini-1.5-pro-latest"
 MOUSE_MOVE_DURATION = 0.25
+OCR_LANGUAGES = ['en'] # Languages for easyocr to use
 
 # --- State ---
 process_lock = threading.Lock()
 running = True
+easyocr_reader = None # Global reader instance for efficiency
 
 # === SETUP FUNCTIONS ===
 
 def check_windows():
-    print("--- Checking Operating System ---")
+    print("--- Checking OS ---")
     if platform.system() != "Windows": print("ERROR: Windows only."); return False
     print("OS: Windows (OK)."); return True
 
 def check_python_version():
-    print("\n--- Checking Python Version ---")
+    print("\n--- Checking Python ---")
     if sys.version_info < (3, 8): print(f"ERROR: Python 3.8+ required."); return False
     print(f"Python {platform.python_version()} OK."); return True
+
+def initialize_ocr():
+    """Initializes the EasyOCR reader."""
+    global easyocr_reader, easyocr
+    if easyocr is None:
+        print("ERROR: easyocr library not loaded, cannot initialize OCR.", file=sys.stderr)
+        return False
+    if easyocr_reader is None:
+        try:
+            print("\n--- Initializing EasyOCR Reader ---")
+            print(f"Languages: {OCR_LANGUAGES}. This may download models on first run...")
+            # gpu=True can be faster if compatible GPU and drivers are installed
+            # gpu=False forces CPU mode, which is more universally compatible
+            easyocr_reader = easyocr.Reader(OCR_LANGUAGES, gpu=False)
+            print("EasyOCR Reader initialized successfully.")
+            return True
+        except Exception as e:
+            print(f"!!! ERROR initializing EasyOCR: {type(e).__name__}: {e} !!!", file=sys.stderr)
+            print("   Ensure you have internet access for model download on first run.", file=sys.stderr)
+            print("   Consider installing C++ Build Tools if errors mention them.", file=sys.stderr)
+            traceback.print_exc(file=sys.stderr)
+            easyocr_reader = None # Ensure it's None on failure
+            return False
+    else:
+        print("EasyOCR Reader already initialized.")
+        return True # Already initialized
 
 def install_libraries():
     print("\n--- Verifying Required Libraries ---")
     all_found = True
+    # Add numpy check explicitly although easyocr requires it
+    if 'numpy' not in REQUIRED_LIBRARIES: REQUIRED_LIBRARIES.insert(-1, 'numpy')
+
     for lib in REQUIRED_LIBRARIES:
         import_name = lib; found = False
         if lib == 'Pillow': import_name = 'PIL'
@@ -70,18 +105,22 @@ def install_libraries():
     else:
         print("All required libs appear installed. Importing...")
         try:
-            global keyboard, mss, mss_tools, Image, genai, google_api_core_exceptions, pyautogui
-            import keyboard, mss, mss.tools as mss_tools
-            from PIL import Image # Correct import
+            # Import necessary modules globally
+            global keyboard, mss, mss_tools, Image, genai, google_api_core_exceptions, pyautogui, easyocr, np
+            import keyboard, mss, mss.tools as mss_tools, numpy as np
+            from PIL import Image
             import google.generativeai as genai, google.api_core.exceptions as google_api_core_exceptions
             import pyautogui
+            import easyocr # Import easyocr itself
             pyautogui.FAILSAFE = False; print(f"PyAutoGUI FAILSAFE={pyautogui.FAILSAFE}")
             print("Core libs imported."); return True
         except Exception as e: print(f"ERROR: Final import failed: {e}", file=sys.stderr); traceback.print_exc(file=sys.stderr); return False
 
+
 # === MAIN APPLICATION FUNCTIONS ===
 
 def move_mouse_to_answer(box_coords, monitor_info):
+    # [This function remains unchanged - it takes standard coordinates]
     print("--- Attempting Mouse Movement ---")
     global running, pyautogui
     if pyautogui is None: print("ERROR: PyAutoGUI not loaded.", file=sys.stderr); return False
@@ -99,46 +138,125 @@ def move_mouse_to_answer(box_coords, monitor_info):
         print("--- Mouse Move Attempt Finished ---"); return True
     except Exception as e: print(f"!!! ERROR during mouse move: {e}", file=sys.stderr); return False
 
-def get_answer_location_from_ai(pil_image):
-    print(f"--- Asking AI ({AI_MODEL_NAME}) for Location ---")
+# --- MODIFIED: AI now returns TEXT of the answer ---
+def get_correct_answer_text_from_ai(pil_image):
+    print(f"--- Asking AI ({AI_MODEL_NAME}) for Correct Answer TEXT ---")
     global running, genai, GOOGLE_API_KEY
     if not running: print("AI skipped: Shutdown."); return None
     if genai is None: print("ERROR: GenAI lib not loaded.", file=sys.stderr); return None
-    try:
+    try: # API Key Check
          if 'GOOGLE_API_KEY' not in globals() or not GOOGLE_API_KEY or GOOGLE_API_KEY == "YOUR_GOOGLE_API_KEY_HERE": raise NameError("API Key missing")
     except NameError: print("!!! FATAL: API Key missing/invalid.", file=sys.stderr); return None
     try: model = genai.GenerativeModel(AI_MODEL_NAME)
     except Exception as e: print(f"ERROR: Failed init Gemini: {e}", file=sys.stderr); return None
+
+    # --- NEW PROMPT FOR TEXT ---
     prompt = """
-Analyze image: MC question. 1. Read Q&A. 2. Use knowledge for best answer.
-3. ID bounding box (xmin,ymin,xmax,ymax) for *entire text* of the correct answer option. Coords relative to image (0,0 top-left).
-4. Respond ONLY: BOX=[xmin,ymin,xmax,ymax] Example: BOX=[150,300,450,325]
-5. If unsure/cannot, respond ONLY: ERROR
-No letter/explanation. Just BOX=[...] or ERROR.
+Analyze the provided image containing a multiple-choice question.
+1. Carefully read the question and all the presented answer options (A, B, C, D...).
+2. Use your internal knowledge about the subject matter to determine the single best correct answer option.
+3. Respond ONLY with the exact, complete text of that correct answer option as it appears in the image.
+   Example: If the correct answer is "C) Southern landowners", respond ONLY with: Southern landowners
+   Example: If the correct answer is "A) Members of nativist political parties", respond ONLY with: Members of nativist political parties
+4. Do NOT include the option letter (A, B, C, D) or surrounding characters like parentheses unless they are truly part of the answer text itself.
+5. If you cannot confidently determine the correct answer text, respond ONLY with the single word: ERROR
+Do not provide explanations, reasoning, or any other text. Just the verbatim answer text or ERROR.
 """
     try:
-        print(f"Sending prompt to Gemini '{AI_MODEL_NAME}'..."); start_time = time.time()
-        response = model.generate_content([prompt, pil_image], generation_config=genai.types.GenerationConfig(temperature=0.0), request_options={'timeout': 120})
+        print(f"Sending prompt to Gemini '{AI_MODEL_NAME}' for text..."); start_time = time.time()
+        response = model.generate_content([prompt, pil_image], generation_config=genai.types.GenerationConfig(temperature=0.1), request_options={'timeout': 90}) # Slightly higher temp ok for text
         duration = time.time() - start_time; print(f"Gemini response in {duration:.2f}s.")
         raw_response_text = "Unavailable"
         if response.candidates:
             try: raw_response_text = response.text
             except Exception as e_text: raw_response_text = f"Blocked/Error: {e_text}. Feedback: {response.prompt_feedback}"
         else: raw_response_text = f"No candidates. Feedback: {response.prompt_feedback}"
-        print(f"AI Raw: '{raw_response_text}'"); ai_response_text = raw_response_text.strip()
-        if "ERROR" in ai_response_text.upper(): print("AI responded ERROR."); return None
-        match = re.search(r"BOX\s*=\s*\[\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*\]", ai_response_text)
-        if match:
-            coords = [int(c) for c in match.groups()]
-            if coords[0] < coords[2] and coords[1] < coords[3]: print(f"Parsed Coords: {coords}"); return coords
-            else: print(f"Parsed invalid coords: {coords}"); return None
-        else: print("AI response format mismatch."); return None
+        print(f"AI Raw Text Response: '{raw_response_text}'"); ai_response_text = raw_response_text.strip()
+
+        if "ERROR" in ai_response_text.upper() or len(ai_response_text) < 3: # Also treat very short responses as potential errors
+            print("AI responded ERROR or response too short.")
+            return None
+        else:
+            # Return the cleaned text provided by the AI
+            # Further cleaning might be needed depending on AI consistency
+            cleaned_text = ai_response_text.strip('\'" .,:;-') # Basic cleaning
+            print(f"AI provided answer text: '{cleaned_text}'")
+            print("--- AI Text Query Finished ---")
+            return cleaned_text
     except Exception as e: print(f"!!! ERROR during Gemini call: {e}", file=sys.stderr); return None
 
+# --- NEW: Find text location using EasyOCR ---
+def find_text_location_on_screen(pil_image, target_text):
+    """Uses EasyOCR to find the bounding box of target_text in the image."""
+    global running, easyocr_reader, np
+    print(f"--- Starting OCR to find text: '{target_text}' ---")
+    if not running: print("OCR skipped: Shutdown."); return None
+    if easyocr_reader is None: print("ERROR: EasyOCR reader not initialized.", file=sys.stderr); return None
+    if np is None: print("ERROR: Numpy not loaded.", file=sys.stderr); return None
+    if not target_text: print("ERROR: No target text provided for OCR.", file=sys.stderr); return None
+
+    try:
+        # Convert PIL image to NumPy array (required by easyocr)
+        image_np = np.array(pil_image)
+        print("Converted screenshot to NumPy array for OCR.")
+
+        # Perform OCR
+        start_time = time.time()
+        # detail=1 gives coordinates, paragraph=False treats lines separately
+        results = easyocr_reader.readtext(image_np, detail=1, paragraph=False)
+        duration = time.time() - start_time
+        print(f"EasyOCR finished in {duration:.2f}s. Found {len(results)} text blocks.")
+
+        # --- Search for the target text ---
+        target_lower = target_text.lower().strip()
+        found_box = None
+        best_match_confidence = 0 # Optional: if multiple matches, take highest confidence?
+
+        for (bbox_corners, text, confidence) in results:
+            ocr_text_lower = text.lower().strip()
+            print(f"  OCR Found: '{text}' (Conf: {confidence:.2f})") # Log what OCR sees
+
+            # --- Matching Logic ---
+            # Simple containment check often works well for multi-word answers
+            if target_lower in ocr_text_lower:
+                print(f"  >>> Potential Match Found: '{text}' contains '{target_text}'")
+                # Optional: Improve matching - check confidence, maybe fuzzy match?
+                # For now, take the first good match.
+                # bbox_corners is [[x1,y1],[x2,y2],[x3,y3],[x4,y4]]
+
+                # Convert corner points to [xmin, ymin, xmax, ymax]
+                x_coords = [point[0] for point in bbox_corners]
+                y_coords = [point[1] for point in bbox_corners]
+                xmin = min(x_coords)
+                ymin = min(y_coords)
+                xmax = max(x_coords)
+                ymax = max(y_coords)
+                found_box = [int(xmin), int(ymin), int(xmax), int(ymax)]
+                print(f"      Converted BBox: {found_box}")
+                break # Stop searching after first match
+
+            # Alternative: Exact match (less robust if OCR adds/misses chars)
+            # if ocr_text_lower == target_lower:
+            #     # ... convert bbox ...
+            #     break
+
+        if found_box:
+            print(f"--- OCR Found location for '{target_text}': {found_box} ---")
+            return found_box
+        else:
+            print(f"--- OCR Could NOT find '{target_text}' on screen. ---")
+            return None
+
+    except Exception as e:
+        print(f"!!! ERROR during EasyOCR processing: {type(e).__name__}: {e} !!!", file=sys.stderr)
+        traceback.print_exc(file=sys.stderr)
+        return None
+
+# --- MODIFIED: Main processing function ---
 def process_screenshot_and_move_mouse():
-    print("\n=== Starting Screenshot and Processing Cycle ===")
+    print("\n=== Starting Screenshot + AI Text + OCR Location Cycle ===")
     global running, mss, Image, process_lock, pyautogui, keyboard
-    screenshot_pil_img = monitor_info = coords = None
+    screenshot_pil_img = monitor_info = ai_answer_text = ocr_coords = None
     start_time = time.time()
     lock_released = False
 
@@ -149,33 +267,53 @@ def process_screenshot_and_move_mouse():
             except RuntimeError: print(f"Warn: Lock release failed ({reason}) - not owned?")
 
     try: # >>>>> OUTER TRY for whole process <<<<<<
-        if not all([mss, Image, pyautogui, keyboard]): print("ERROR: Core libs not available.", file=sys.stderr); return
+        # 1. Check Libs & OCR Reader
+        if not all([mss, Image, pyautogui, keyboard, easyocr_reader, np]):
+             print("ERROR: Core libs or OCR reader not available.", file=sys.stderr); return
+
+        # 2. Take Screenshot
         print("Taking screenshot...")
         screenshot_exception = None
-        try: # Minimal block for screenshot errors
+        try:
             with mss.mss() as sct:
                 monitor_index = 1 if len(sct.monitors) > 1 else 0
-                if not sct.monitors: print("FATAL: No monitors detected.", file=sys.stderr); return
+                if not sct.monitors: print("FATAL: No monitors.", file=sys.stderr); return
                 monitor_info = sct.monitors[monitor_index]; print(f"Using monitor {monitor_index}: {monitor_info}")
                 sct_img = sct.grab(monitor_info); print(f"Captured ({sct_img.width}x{sct_img.height}). Converting...")
                 screenshot_pil_img = Image.frombytes("RGB", sct_img.size, sct_img.bgra, "raw", "BGRX")
                 print("Screenshot converted.")
-        except Exception as scr_e: screenshot_exception = scr_e; print(f"!!! ERROR during screenshot: {scr_e}", file=sys.stderr)
+        except Exception as scr_e: screenshot_exception = scr_e; print(f"!!! ERROR screenshot: {scr_e}", file=sys.stderr)
 
+        # 3. Check state before AI
         if not running: print("Interrupted after screenshot."); return
         if screenshot_pil_img is None: print(f"Screenshot failed{f': {screenshot_exception}' if screenshot_exception else '.'}."); return
 
-        coords = get_answer_location_from_ai(screenshot_pil_img)
-        if not running: print("Interrupted after AI call."); return
+        # 4. Get Answer TEXT from AI
+        ai_answer_text = get_correct_answer_text_from_ai(screenshot_pil_img)
 
-        if coords and monitor_info: move_mouse_to_answer(coords, monitor_info)
-        elif coords is None: print("No valid coords from AI. Mouse not moved.")
-        else: print("Cannot move mouse: Coords/Monitor info missing.")
+        # 5. Check state after AI
+        if not running: print("Interrupted after AI text query."); return
+        if ai_answer_text is None: print("AI did not provide valid answer text."); return # Exit if AI failed
+
+        # 6. Find Text Location using OCR <<<--- NEW STEP ---<<<
+        ocr_coords = find_text_location_on_screen(screenshot_pil_img, ai_answer_text)
+
+        # 7. Check state after OCR
+        if not running: print("Interrupted after OCR."); return
+
+        # 8. Move Mouse (using OCR coords)
+        if ocr_coords and monitor_info:
+            move_mouse_to_answer(ocr_coords, monitor_info)
+        elif ocr_coords is None:
+            print("OCR failed to find the text from AI. Mouse not moved.")
+        else: # Should be unreachable
+            print("Cannot move mouse: OCR Coords/Monitor info missing.")
 
     finally: # >>>>> OUTER FINALLY <<<<<<
         cycle_duration = time.time() - start_time; print(f"Processing cycle finished in {cycle_duration:.2f}s.")
         release_lock_if_held("End of cycle")
-        print("=== Screenshot and Processing Cycle Complete ===")
+        print("=== Cycle Complete ===")
+
 
 def handle_trigger():
     global running, process_lock
@@ -192,12 +330,17 @@ def signal_handler(sig, frame):
 # === MAIN EXECUTION BLOCK ===
 def run_main_application():
     global running, genai, GOOGLE_API_KEY, keyboard, pyautogui
-    print("\n--- Starting Gemini Mouse Mover Application ---")
+    print("\n--- Starting AI Text + OCR Mouse Mover ---")
     try: # Configure AI
         if 'GOOGLE_API_KEY' not in globals() or not GOOGLE_API_KEY or GOOGLE_API_KEY == "YOUR_GOOGLE_API_KEY_HERE": raise NameError("API Key missing")
         if genai is None: raise ImportError("GenAI lib missing")
         print(f"Configuring Google AI SDK (model: {AI_MODEL_NAME})..."); genai.configure(api_key=GOOGLE_API_KEY); print("SDK Configured.")
     except Exception as e: print(f"!!! FATAL ERROR config AI: {e}", file=sys.stderr); return
+
+    # --- Initialize OCR Reader ---
+    if not initialize_ocr():
+         print("!!! FATAL ERROR: Failed to initialize OCR. Cannot continue.", file=sys.stderr)
+         return # Cannot proceed without OCR
 
     print("\n--- Performing Quick PyAutoGUI Test ---") # PyAutoGUI Test
     try:
@@ -219,14 +362,12 @@ def run_main_application():
         print("\n"+"="*60+"\nIMPORTANT: Waiting for '{TRIGGER_KEY}'. Run LAUNCHER As Admin!\n"+"="*60+"\n")
         keyboard.add_hotkey(TRIGGER_KEY, handle_trigger, trigger_on_release=False, suppress=SUPPRESS_TRIGGER)
         print("Listener active."); listener_success = True
-
         print("Entering main loop...")
         while running:
             time.sleep(0.5)
         print("Main loop exited.")
-    except ImportError as e: # >>>>> EXCEPT (aligned with try) <<<<<<
-        print(f"\n!!! ERROR: Lib '{e.name}' unavailable.", file=sys.stderr); running = False
-    except Exception as e: # >>>>> EXCEPT (aligned with try) <<<<<<
+    except ImportError as e: print(f"\n!!! ERROR: Lib '{e.name}' unavailable.", file=sys.stderr); running = False
+    except Exception as e:
         print(f"\n!!! ERROR listener/loop: {e} !!!", file=sys.stderr)
         e_str=str(e).lower();
         if isinstance(e, OSError) or "permission" in e_str or "admin" in e_str: print(">>> Check Admin Privs! <<<", file=sys.stderr)
@@ -234,35 +375,28 @@ def run_main_application():
         running = False
     finally: # >>>>> FINALLY (aligned with try) <<<<<<
         print("\n--- Script Stopping: Cleaning Up ---")
-        running = False # Ensure flag is set
-
-        # --- CORRECTED LOCK RELEASE BLOCK ---
+        running = False
         if process_lock.locked():
-            print("Releasing process lock during final cleanup...")
-            try:
-                process_lock.release()
-            except Exception as lock_err: # More specific error might be RuntimeError
-                print(f" - Warn: Error releasing lock on exit: {lock_err}")
-        # --- END CORRECTION ---
-
+            print("Releasing process lock...")
+            try: process_lock.release()
+            except Exception as lock_err: print(f" - Warn: Error releasing lock: {lock_err}")
         print("Cleaning up kbd hooks...");
         if listener_success and keyboard:
-            try:
-                keyboard.unhook_all()
-                print("Hooks removed.")
-            except Exception as uh_e:
-                print(f"Warn: {uh_e}", file=sys.stderr)
+            try: keyboard.unhook_all(); print("Hooks removed.")
+            except Exception as uh_e: print(f"Warn: {uh_e}", file=sys.stderr)
         else: print("Skipping kbd unhook.")
         print("--- Cleanup Complete ---")
 
 # --- Script Entry Point ---
 if __name__ == "__main__":
-    print("="*60 + "\n== Gemini Mouse Mover MC (Mouse Method) ==\n" + "="*60)
+    print("="*60 + "\n== Gemini Text + OCR Mouse Mover (Mouse Method) ==\n" + "="*60)
     print("\n=== Phase 1: Setup Checks ==="); start_time_main = time.time()
     if not check_windows(): sys.exit(1)
     if not check_python_version(): sys.exit(1)
+    # Install_libraries now also imports easyocr, numpy etc if found
     if not install_libraries(): print("\nSetup failed: Libs.", file=sys.stderr); sys.exit(1)
     print(f"\n--- Setup OK ({time.time()-start_time_main:.2f}s) ---")
     print("\n=== Phase 2: Starting Main App ===")
+    # run_main_application now also initializes OCR
     run_main_application()
     print(f"\n=== App Finished ({time.time()-start_time_main:.2f}s total) ===")
