@@ -1,402 +1,413 @@
-# mouse_method.py (or nouse.py) - v8 (AI Text + Local OCR)
-# AI provides correct answer text, script uses easyocr to find it on screen.
-
-import sys
+# CHECKER/LAUNCHER SCRIPT - CORRECTED execute_downloaded_code FOR ENCODING
+import requests
+import hashlib
 import os
-import platform
-import importlib
+import sys
 import time
-import threading
-import signal
-import io
 import traceback
-import re # For parsing AI potentially, though less needed now
-import numpy as np # For image conversion for easyocr
+import subprocess
+import ctypes
+import re # For finding insertion point
 
-# --- Attempt to Import Core Libraries ---
-try:
-    import keyboard
-    import mss
-    import mss.tools
-    from PIL import Image
-    import google.generativeai as genai
-    import google.api_core.exceptions
-    import pyautogui
-    import easyocr # <<<--- NEW OCR Library
-except ImportError as e:
-    print(f"[Startup Info] Initial import check failed for '{e.name}'.")
-    keyboard = mss = Image = genai = google = pyautogui = easyocr = None
-    # numpy might be imported even if easyocr fails, handle None checks later
+# --- GUI Imports ---
+import tkinter as tk
+from tkinter import messagebox
 
 # --- Configuration ---
-GOOGLE_API_KEY = "YOUR_GOOGLE_API_KEY_HERE" # <<<--- CHECKER INJECTS HERE
+# !!! IMPORTANT: This should be your actual key !!!
+GOOGLE_API_KEY_VALUE = "AIzaSyC4acqyS_WwxhQNMNnuPP-cISu0tV43-Dg" # <<<--- VERIFY/REPLACE THIS VALUE!
 
-REQUIRED_LIBRARIES = [
-    "keyboard", "mss", "Pillow", "google-generativeai", "pyautogui",
-    "numpy", "easyocr" # <<<--- NEW Dependencies
-]
-TRIGGER_KEY = '='
-SUPPRESS_TRIGGER = True
-AI_MODEL_NAME = "gemini-1.5-flash-latest" # Flash is probably fine for text extraction
-# AI_MODEL_NAME = "gemini-1.5-pro-latest"
-MOUSE_MOVE_DURATION = 0.25
-OCR_LANGUAGES = ['en'] # Languages for easyocr to use
+# URLs
+ACCESS_KEY_URL = "https://raw.githubusercontent.com/Zodiac132/Scanner/refs/heads/main/key"
+DEFAULT_CODE_URL = "https://raw.githubusercontent.com/Zodiac132/Scanner/refs/heads/main/code.py" # Capslock
+MOUSE_METHOD_CODE_URL = "https://raw.githubusercontent.com/Zodiac132/Scanner/refs/heads/main/nouse" # Mouse + OCR
 
-# --- State ---
-process_lock = threading.Lock()
-running = True
-easyocr_reader = None # Global reader instance for efficiency
+# File/Path Settings
+HASH_FILE_TEMPLATE = "last_code_hash_{}.txt"
+CHECK_INTERVAL_SECONDS = 60 * 5  # 5 minutes
+DOWNLOADED_SCRIPT_FOLDER_NAME = "Documents" # Where scripts are saved
 
-# === SETUP FUNCTIONS ===
+# --- UI Styling ---
+BG_COLOR = 'black'; FG_COLOR = 'white'; ENTRY_BG_COLOR = 'black'
+BUTTON_ACTIVE_BG = '#333333'; PLACEHOLDER_COLOR = 'grey'
 
-def check_windows():
-    print("--- Checking OS ---")
-    if platform.system() != "Windows": print("ERROR: Windows only."); return False
-    print("OS: Windows (OK)."); return True
+# --- Global flags ---
+ACCESS_KEY_VALIDATED = False
+SELECTED_CODE_URL = None # Stores the URL of the chosen method
 
-def check_python_version():
-    print("\n--- Checking Python ---")
-    if sys.version_info < (3, 8): print(f"ERROR: Python 3.8+ required."); return False
-    print(f"Python {platform.python_version()} OK."); return True
+# --- Placeholder Text ---
+PLACEHOLDER_TEXT = "KEY HERE"
 
-def initialize_ocr():
-    """Initializes the EasyOCR reader."""
-    global easyocr_reader, easyocr
-    if easyocr is None:
-        print("ERROR: easyocr library not loaded, cannot initialize OCR.", file=sys.stderr)
-        return False
-    if easyocr_reader is None:
-        try:
-            print("\n--- Initializing EasyOCR Reader ---")
-            print(f"Languages: {OCR_LANGUAGES}. This may download models on first run...")
-            # gpu=True can be faster if compatible GPU and drivers are installed
-            # gpu=False forces CPU mode, which is more universally compatible
-            easyocr_reader = easyocr.Reader(OCR_LANGUAGES, gpu=False)
-            print("EasyOCR Reader initialized successfully.")
-            return True
-        except Exception as e:
-            print(f"!!! ERROR initializing EasyOCR: {type(e).__name__}: {e} !!!", file=sys.stderr)
-            print("   Ensure you have internet access for model download on first run.", file=sys.stderr)
-            print("   Consider installing C++ Build Tools if errors mention them.", file=sys.stderr)
-            traceback.print_exc(file=sys.stderr)
-            easyocr_reader = None # Ensure it's None on failure
-            return False
-    else:
-        print("EasyOCR Reader already initialized.")
-        return True # Already initialized
-
-def install_libraries():
-    print("\n--- Verifying Required Libraries ---")
-    all_found = True
-    # Add numpy check explicitly although easyocr requires it
-    if 'numpy' not in REQUIRED_LIBRARIES: REQUIRED_LIBRARIES.insert(-1, 'numpy')
-
-    for lib in REQUIRED_LIBRARIES:
-        import_name = lib; found = False
-        if lib == 'Pillow': import_name = 'PIL'
-        elif lib == 'google-generativeai': import_name = 'google.generativeai'
-        try:
-            if importlib.util.find_spec(import_name): print(f"- '{lib}' found."); found = True
-            else: print(f"- '{lib}' NOT FOUND.")
-        except Exception as e: print(f"Warn: Error check '{lib}': {e}")
-        if not found: all_found = False
-
-    if not all_found: print("\nERROR: Libs missing.", file=sys.stderr); return False
-    else:
-        print("All required libs appear installed. Importing...")
-        try:
-            # Import necessary modules globally
-            global keyboard, mss, mss_tools, Image, genai, google_api_core_exceptions, pyautogui, easyocr, np
-            import keyboard, mss, mss.tools as mss_tools, numpy as np
-            from PIL import Image
-            import google.generativeai as genai, google.api_core.exceptions as google_api_core_exceptions
-            import pyautogui
-            import easyocr # Import easyocr itself
-            pyautogui.FAILSAFE = False; print(f"PyAutoGUI FAILSAFE={pyautogui.FAILSAFE}")
-            print("Core libs imported."); return True
-        except Exception as e: print(f"ERROR: Final import failed: {e}", file=sys.stderr); traceback.print_exc(file=sys.stderr); return False
-
-
-# === MAIN APPLICATION FUNCTIONS ===
-
-def move_mouse_to_answer(box_coords, monitor_info):
-    # [This function remains unchanged - it takes standard coordinates]
-    print("--- Attempting Mouse Movement ---")
-    global running, pyautogui
-    if pyautogui is None: print("ERROR: PyAutoGUI not loaded.", file=sys.stderr); return False
-    if not box_coords or len(box_coords) != 4: print(f"ERROR: Invalid coords: {box_coords}", file=sys.stderr); return False
+# --- Core Functions ---
+def fetch_remote_data(url, data_description="data"):
+    print(f"Fetching {data_description} from: {url}")
+    headers = {'Cache-Control': 'no-cache', 'Pragma': 'no-cache', 'User-Agent': 'Mozilla/5.0'}
     try:
-        x_min, y_min, x_max, y_max = map(int, box_coords)
-        if x_min >= x_max or y_min >= y_max: print(f"ERROR: Invalid box (min>=max): {box_coords}", file=sys.stderr); return False
-        center_x_rel=(x_min+x_max)//2; center_y_rel=(y_min+y_max)//2
-        absolute_x=monitor_info['left']+center_x_rel; absolute_y=monitor_info['top']+center_y_rel
-        print(f"Target Box(rel): [{x_min},{y_min},{x_max},{y_max}], Abs Coords: ({absolute_x}, {absolute_y})")
-        print(f"Executing pyautogui.moveTo({absolute_x}, {absolute_y}, duration={MOUSE_MOVE_DURATION})...")
-        pyautogui.moveTo(absolute_x, absolute_y, duration=MOUSE_MOVE_DURATION)
-        final_x, final_y = pyautogui.position(); print(f"Pos after move: ({final_x}, {final_y})")
-        if abs(final_x-absolute_x)>5 or abs(final_y-absolute_y)>5: print("Warn: Mouse pos differs from target.")
-        print("--- Mouse Move Attempt Finished ---"); return True
-    except Exception as e: print(f"!!! ERROR during mouse move: {e}", file=sys.stderr); return False
-
-# --- MODIFIED: AI now returns TEXT of the answer ---
-def get_correct_answer_text_from_ai(pil_image):
-    print(f"--- Asking AI ({AI_MODEL_NAME}) for Correct Answer TEXT ---")
-    global running, genai, GOOGLE_API_KEY
-    if not running: print("AI skipped: Shutdown."); return None
-    if genai is None: print("ERROR: GenAI lib not loaded.", file=sys.stderr); return None
-    try: # API Key Check
-         if 'GOOGLE_API_KEY' not in globals() or not GOOGLE_API_KEY or GOOGLE_API_KEY == "YOUR_GOOGLE_API_KEY_HERE": raise NameError("API Key missing")
-    except NameError: print("!!! FATAL: API Key missing/invalid.", file=sys.stderr); return None
-    try: model = genai.GenerativeModel(AI_MODEL_NAME)
-    except Exception as e: print(f"ERROR: Failed init Gemini: {e}", file=sys.stderr); return None
-
-    # --- NEW PROMPT FOR TEXT ---
-    prompt = """
-Analyze the provided image containing a multiple-choice question.
-1. Carefully read the question and all the presented answer options (A, B, C, D...).
-2. Use your internal knowledge about the subject matter to determine the single best correct answer option.
-3. Respond ONLY with the exact, complete text of that correct answer option as it appears in the image.
-   Example: If the correct answer is "C) Southern landowners", respond ONLY with: Southern landowners
-   Example: If the correct answer is "A) Members of nativist political parties", respond ONLY with: Members of nativist political parties
-4. Do NOT include the option letter (A, B, C, D) or surrounding characters like parentheses unless they are truly part of the answer text itself.
-5. If you cannot confidently determine the correct answer text, respond ONLY with the single word: ERROR
-Do not provide explanations, reasoning, or any other text. Just the verbatim answer text or ERROR.
-"""
-    try:
-        print(f"Sending prompt to Gemini '{AI_MODEL_NAME}' for text..."); start_time = time.time()
-        response = model.generate_content([prompt, pil_image], generation_config=genai.types.GenerationConfig(temperature=0.1), request_options={'timeout': 90}) # Slightly higher temp ok for text
-        duration = time.time() - start_time; print(f"Gemini response in {duration:.2f}s.")
-        raw_response_text = "Unavailable"
-        if response.candidates:
-            try: raw_response_text = response.text
-            except Exception as e_text: raw_response_text = f"Blocked/Error: {e_text}. Feedback: {response.prompt_feedback}"
-        else: raw_response_text = f"No candidates. Feedback: {response.prompt_feedback}"
-        print(f"AI Raw Text Response: '{raw_response_text}'"); ai_response_text = raw_response_text.strip()
-
-        if "ERROR" in ai_response_text.upper() or len(ai_response_text) < 3: # Also treat very short responses as potential errors
-            print("AI responded ERROR or response too short.")
-            return None
-        else:
-            # Return the cleaned text provided by the AI
-            # Further cleaning might be needed depending on AI consistency
-            cleaned_text = ai_response_text.strip('\'" .,:;-') # Basic cleaning
-            print(f"AI provided answer text: '{cleaned_text}'")
-            print("--- AI Text Query Finished ---")
-            return cleaned_text
-    except Exception as e: print(f"!!! ERROR during Gemini call: {e}", file=sys.stderr); return None
-
-# --- NEW: Find text location using EasyOCR ---
-def find_text_location_on_screen(pil_image, target_text):
-    """Uses EasyOCR to find the bounding box of target_text in the image."""
-    global running, easyocr_reader, np
-    print(f"--- Starting OCR to find text: '{target_text}' ---")
-    if not running: print("OCR skipped: Shutdown."); return None
-    if easyocr_reader is None: print("ERROR: EasyOCR reader not initialized.", file=sys.stderr); return None
-    if np is None: print("ERROR: Numpy not loaded.", file=sys.stderr); return None
-    if not target_text: print("ERROR: No target text provided for OCR.", file=sys.stderr); return None
-
-    try:
-        # Convert PIL image to NumPy array (required by easyocr)
-        image_np = np.array(pil_image)
-        print("Converted screenshot to NumPy array for OCR.")
-
-        # Perform OCR
-        start_time = time.time()
-        # detail=1 gives coordinates, paragraph=False treats lines separately
-        results = easyocr_reader.readtext(image_np, detail=1, paragraph=False)
-        duration = time.time() - start_time
-        print(f"EasyOCR finished in {duration:.2f}s. Found {len(results)} text blocks.")
-
-        # --- Search for the target text ---
-        target_lower = target_text.lower().strip()
-        found_box = None
-        best_match_confidence = 0 # Optional: if multiple matches, take highest confidence?
-
-        for (bbox_corners, text, confidence) in results:
-            ocr_text_lower = text.lower().strip()
-            print(f"  OCR Found: '{text}' (Conf: {confidence:.2f})") # Log what OCR sees
-
-            # --- Matching Logic ---
-            # Simple containment check often works well for multi-word answers
-            if target_lower in ocr_text_lower:
-                print(f"  >>> Potential Match Found: '{text}' contains '{target_text}'")
-                # Optional: Improve matching - check confidence, maybe fuzzy match?
-                # For now, take the first good match.
-                # bbox_corners is [[x1,y1],[x2,y2],[x3,y3],[x4,y4]]
-
-                # Convert corner points to [xmin, ymin, xmax, ymax]
-                x_coords = [point[0] for point in bbox_corners]
-                y_coords = [point[1] for point in bbox_corners]
-                xmin = min(x_coords)
-                ymin = min(y_coords)
-                xmax = max(x_coords)
-                ymax = max(y_coords)
-                found_box = [int(xmin), int(ymin), int(xmax), int(ymax)]
-                print(f"      Converted BBox: {found_box}")
-                break # Stop searching after first match
-
-            # Alternative: Exact match (less robust if OCR adds/misses chars)
-            # if ocr_text_lower == target_lower:
-            #     # ... convert bbox ...
-            #     break
-
-        if found_box:
-            print(f"--- OCR Found location for '{target_text}': {found_box} ---")
-            return found_box
-        else:
-            print(f"--- OCR Could NOT find '{target_text}' on screen. ---")
-            return None
-
+        response = requests.get(url, timeout=30, headers=headers)
+        response.raise_for_status()
+        print(f"Fetch successful for {data_description}.")
+        return response.text
+    except requests.exceptions.Timeout:
+        print(f"Error: Timeout fetching {data_description} from {url}", file=sys.stderr)
+        return None
+    except requests.exceptions.RequestException as e:
+        print(f"Error fetching {data_description} from {url}: {e}", file=sys.stderr)
+        return None
     except Exception as e:
-        print(f"!!! ERROR during EasyOCR processing: {type(e).__name__}: {e} !!!", file=sys.stderr)
-        traceback.print_exc(file=sys.stderr)
+        print(f"Unexpected error fetching {data_description}: {e}", file=sys.stderr)
         return None
 
-# --- MODIFIED: Main processing function ---
-def process_screenshot_and_move_mouse():
-    print("\n=== Starting Screenshot + AI Text + OCR Location Cycle ===")
-    global running, mss, Image, process_lock, pyautogui, keyboard
-    screenshot_pil_img = monitor_info = ai_answer_text = ocr_coords = None
-    start_time = time.time()
-    lock_released = False
+def get_valid_access_keys():
+    key_data = fetch_remote_data(ACCESS_KEY_URL, "valid access keys list")
+    if key_data is None: return None
+    valid_keys = [line.strip() for line in key_data.splitlines() if line.strip()]
+    print(f"Found {len(valid_keys)} potential access keys.")
+    return valid_keys
 
-    def release_lock_if_held(reason=""):
-        nonlocal lock_released
-        if process_lock.locked():
-            try: process_lock.release(); print(f"Lock released: {reason}"); lock_released = True
-            except RuntimeError: print(f"Warn: Lock release failed ({reason}) - not owned?")
-
-    try: # >>>>> OUTER TRY for whole process <<<<<<
-        # 1. Check Libs & OCR Reader
-        if not all([mss, Image, pyautogui, keyboard, easyocr_reader, np]):
-             print("ERROR: Core libs or OCR reader not available.", file=sys.stderr); return
-
-        # 2. Take Screenshot
-        print("Taking screenshot...")
-        screenshot_exception = None
-        try:
-            with mss.mss() as sct:
-                monitor_index = 1 if len(sct.monitors) > 1 else 0
-                if not sct.monitors: print("FATAL: No monitors.", file=sys.stderr); return
-                monitor_info = sct.monitors[monitor_index]; print(f"Using monitor {monitor_index}: {monitor_info}")
-                sct_img = sct.grab(monitor_info); print(f"Captured ({sct_img.width}x{sct_img.height}). Converting...")
-                screenshot_pil_img = Image.frombytes("RGB", sct_img.size, sct_img.bgra, "raw", "BGRX")
-                print("Screenshot converted.")
-        except Exception as scr_e: screenshot_exception = scr_e; print(f"!!! ERROR screenshot: {scr_e}", file=sys.stderr)
-
-        # 3. Check state before AI
-        if not running: print("Interrupted after screenshot."); return
-        if screenshot_pil_img is None: print(f"Screenshot failed{f': {screenshot_exception}' if screenshot_exception else '.'}."); return
-
-        # 4. Get Answer TEXT from AI
-        ai_answer_text = get_correct_answer_text_from_ai(screenshot_pil_img)
-
-        # 5. Check state after AI
-        if not running: print("Interrupted after AI text query."); return
-        if ai_answer_text is None: print("AI did not provide valid answer text."); return # Exit if AI failed
-
-        # 6. Find Text Location using OCR <<<--- NEW STEP ---<<<
-        ocr_coords = find_text_location_on_screen(screenshot_pil_img, ai_answer_text)
-
-        # 7. Check state after OCR
-        if not running: print("Interrupted after OCR."); return
-
-        # 8. Move Mouse (using OCR coords)
-        if ocr_coords and monitor_info:
-            move_mouse_to_answer(ocr_coords, monitor_info)
-        elif ocr_coords is None:
-            print("OCR failed to find the text from AI. Mouse not moved.")
-        else: # Should be unreachable
-            print("Cannot move mouse: OCR Coords/Monitor info missing.")
-
-    finally: # >>>>> OUTER FINALLY <<<<<<
-        cycle_duration = time.time() - start_time; print(f"Processing cycle finished in {cycle_duration:.2f}s.")
-        release_lock_if_held("End of cycle")
-        print("=== Cycle Complete ===")
-
-
-def handle_trigger():
-    global running, process_lock
-    if not running: print("Trigger ignored: Shutdown."); return
-    print(f"\n'{TRIGGER_KEY}' key detected!")
-    if process_lock.acquire(blocking=False):
-        print("Acquired lock. Starting analysis thread..."); thread = threading.Thread(target=process_screenshot_and_move_mouse, daemon=True); thread.start()
-    else: print("Processing already in progress. Ignoring trigger.")
-
-def signal_handler(sig, frame):
-    global running
-    if running: print("\n!!! Shutdown signal received !!!"); running = False
-
-# === MAIN EXECUTION BLOCK ===
-def run_main_application():
-    global running, genai, GOOGLE_API_KEY, keyboard, pyautogui
-    print("\n--- Starting AI Text + OCR Mouse Mover ---")
-    try: # Configure AI
-        if 'GOOGLE_API_KEY' not in globals() or not GOOGLE_API_KEY or GOOGLE_API_KEY == "YOUR_GOOGLE_API_KEY_HERE": raise NameError("API Key missing")
-        if genai is None: raise ImportError("GenAI lib missing")
-        print(f"Configuring Google AI SDK (model: {AI_MODEL_NAME})..."); genai.configure(api_key=GOOGLE_API_KEY); print("SDK Configured.")
-    except Exception as e: print(f"!!! FATAL ERROR config AI: {e}", file=sys.stderr); return
-
-    # --- Initialize OCR Reader ---
-    if not initialize_ocr():
-         print("!!! FATAL ERROR: Failed to initialize OCR. Cannot continue.", file=sys.stderr)
-         return # Cannot proceed without OCR
-
-    print("\n--- Performing Quick PyAutoGUI Test ---") # PyAutoGUI Test
+def get_documents_folder():
     try:
-        if pyautogui is None: raise ImportError("PyAutoGUI lib missing")
-        start_x, start_y = pyautogui.position(); print(f"Start:({start_x},{start_y}). Moving..."); pyautogui.moveRel(10, 10, duration=0.1); time.sleep(0.1); end_x, end_y = pyautogui.position()
-        print(f"End:({end_x},{end_y}). Moving back..."); pyautogui.moveTo(start_x, start_y, duration=0.1); time.sleep(0.1); final_x, final_y = pyautogui.position(); print(f"Final:({final_x},{final_y})")
-        if abs(end_x-(start_x+10))<5 and abs(final_x-start_x)<5 : print("PyAutoGUI test SUCCESSFUL.")
-        else: print("!!! PyAutoGUI test WARNING: Move inaccurate. Permissions? !!!")
-    except Exception as e_test: print(f"!!! PyAutoGUI test FAILED: {e_test}", file=sys.stderr)
-    print("--- PyAutoGUI Test Complete ---")
-
-    print("\nSetting up signal handler (Ctrl+C)..."); signal.signal(signal.SIGINT, signal_handler); print("Handler set.")
-
-    # --- Setup Listener & Main Loop ---
-    print("\n--- Setting up Keyboard Listener ---")
-    listener_success = False
-    try: # >>>>> OUTER TRY for listener/loop <<<<<<
-        if keyboard is None: raise ImportError("'keyboard' lib missing.")
-        print("\n"+"="*60+"\nIMPORTANT: Waiting for '{TRIGGER_KEY}'. Run LAUNCHER As Admin!\n"+"="*60+"\n")
-        keyboard.add_hotkey(TRIGGER_KEY, handle_trigger, trigger_on_release=False, suppress=SUPPRESS_TRIGGER)
-        print("Listener active."); listener_success = True
-        print("Entering main loop...")
-        while running:
-            time.sleep(0.5)
-        print("Main loop exited.")
-    except ImportError as e: print(f"\n!!! ERROR: Lib '{e.name}' unavailable.", file=sys.stderr); running = False
+        home_dir = os.path.expanduser("~")
+        documents_folder = os.path.join(home_dir, DOWNLOADED_SCRIPT_FOLDER_NAME)
+        os.makedirs(documents_folder, exist_ok=True)
+        return documents_folder
     except Exception as e:
-        print(f"\n!!! ERROR listener/loop: {e} !!!", file=sys.stderr)
-        e_str=str(e).lower();
-        if isinstance(e, OSError) or "permission" in e_str or "admin" in e_str: print(">>> Check Admin Privs! <<<", file=sys.stderr)
-        else: traceback.print_exc(file=sys.stderr)
-        running = False
-    finally: # >>>>> FINALLY (aligned with try) <<<<<<
-        print("\n--- Script Stopping: Cleaning Up ---")
-        running = False
-        if process_lock.locked():
-            print("Releasing process lock...")
-            try: process_lock.release()
-            except Exception as lock_err: print(f" - Warn: Error releasing lock: {lock_err}")
-        print("Cleaning up kbd hooks...");
-        if listener_success and keyboard:
-            try: keyboard.unhook_all(); print("Hooks removed.")
-            except Exception as uh_e: print(f"Warn: {uh_e}", file=sys.stderr)
-        else: print("Skipping kbd unhook.")
-        print("--- Cleanup Complete ---")
+        error_msg = f"Error accessing/creating Documents folder: {e}"
+        print(error_msg, file=sys.stderr)
+        try: tk.messagebox.showerror("File System Error", error_msg)
+        except Exception: pass
+        return None
+
+def get_checker_data_dir():
+    try:
+        app_data_dir = os.getenv('APPDATA')
+        if app_data_dir and os.name == 'nt':
+            checker_cache_dir = os.path.join(app_data_dir, "CheckerAppCache")
+        else:
+            checker_cache_dir = os.path.join(os.path.expanduser("~"), ".checkerapp_cache")
+        os.makedirs(checker_cache_dir, exist_ok=True)
+        return checker_cache_dir
+    except Exception as e:
+        print(f"Error getting/creating checker data directory: {e}", file=sys.stderr)
+        try: # Fallback to script directory (less ideal)
+            script_dir = os.path.dirname(sys.executable) if getattr(sys, 'frozen', False) else os.path.dirname(os.path.abspath(__file__))
+            print(f"Warning: Using script directory for hash file due to error: {script_dir}", file=sys.stderr)
+            os.makedirs(script_dir, exist_ok=True)
+            return script_dir
+        except Exception as e2: print(f"CRITICAL: Failed to get any directory for hash file: {e2}", file=sys.stderr); return None
+
+def calculate_hash(data_string):
+    if data_string is None: return None
+    return hashlib.sha256(data_string.encode('utf-8')).hexdigest()
+
+def read_last_hash(filepath):
+    if not filepath or not os.path.exists(filepath): return None
+    try:
+        with open(filepath, 'r', encoding='utf-8') as f: return f.read().strip() or None
+    except Exception as e: print(f"Error reading hash from {filepath}: {e}", file=sys.stderr); return None
+
+def write_last_hash(filepath, current_hash):
+    if not filepath: print("Error: Invalid filepath for hash.", file=sys.stderr); return False
+    try:
+        os.makedirs(os.path.dirname(filepath), exist_ok=True)
+        with open(filepath, 'w', encoding='utf-8') as f: f.write(current_hash)
+        print(f"Wrote new hash to '{filepath}'")
+        return True
+    except Exception as e: print(f"Error writing hash to {filepath}: {e}", file=sys.stderr); return False
+
+def inject_api_key(code_string, api_key):
+    """Injects the GOOGLE_API_KEY definition, preferably replacing a placeholder."""
+    print("--- Attempting API Key Injection ---")
+    already_present_pattern = rf'^\s*GOOGLE_API_KEY\s*=\s*"{re.escape(api_key)}"'
+    if re.search(already_present_pattern, code_string, re.MULTILINE):
+        print("API Key already present and correct. Skipping injection.")
+        return code_string
+
+    placeholder_line_pattern = r'^\s*GOOGLE_API_KEY\s*=\s*".*"\s*#\s*<<<--- CHECKER INJECTS HERE'
+    key_injection_line = f'GOOGLE_API_KEY = "{api_key}" # Injected by checker'
+
+    code_string, num_replacements = re.subn(placeholder_line_pattern, key_injection_line, code_string, count=1, flags=re.MULTILINE)
+
+    if num_replacements > 0:
+        print("Successfully injected API key by replacing placeholder line.")
+    else:
+        # Fallback logic (inject near top) - Less ideal but better than nothing
+        print("Warning: Placeholder line not found. Using fallback injection.")
+        lines = code_string.splitlines()
+        injection_index = min(1, len(lines)) # Inject at line 2 (index 1) or 1 if only one line
+        lines.insert(injection_index, key_injection_line)
+        code_string = "\n".join(lines)
+        print(f"API Key injected via fallback near line {injection_index + 1}.")
+
+    print("--- Finished API Key Injection Attempt ---")
+    return code_string
+
+# --- UPDATED execute_downloaded_code Function ---
+def execute_downloaded_code(code_string_with_key, url, target_dir):
+    """
+    Saves the modified code and executes it.
+    Sets PYTHONIOENCODING=UTF-8 for subprocesses to handle potential console output issues.
+    Uses exec() if running as frozen, subprocess otherwise.
+    """
+    if not target_dir:
+        print("Error: No valid target directory provided for execution.", file=sys.stderr)
+        return False
+
+    # Determine filename based on URL (simple approach - adapt if needed)
+    downloaded_script_filename = os.path.basename(url)
+    if not os.path.splitext(downloaded_script_filename)[1]:
+        downloaded_script_filename += ".py"
+    script_path = os.path.join(target_dir, downloaded_script_filename)
+
+    is_frozen = getattr(sys, 'frozen', False)
+
+    print("\n" + "="*60)
+    print(f"PREPARING TO EXECUTE: {script_path}")
+    print(f"From URL: {url}")
+    print(f"Running as frozen executable: {is_frozen}")
+    print("="*60)
+
+    # --- Save the code ---
+    try:
+        print(f"Saving code [WITH INJECTED KEY] to '{script_path}'...")
+        os.makedirs(target_dir, exist_ok=True)
+        with open(script_path, 'w', encoding='utf-8') as f:
+            f.write(code_string_with_key)
+        print("Code saved.")
+    except Exception as e:
+        print(f"!!! ERROR saving code to '{script_path}': {e}", file=sys.stderr)
+        traceback.print_exc(file=sys.stderr)
+        return False
+
+    if not os.path.exists(script_path):
+        print(f"!!! CRITICAL ERROR: Failed to save or find {script_path}.", file=sys.stderr)
+        return False
+    print(f"Verified script exists: {script_path}")
+
+    # --- Execute the saved script ---
+    execution_successful = False
+    original_cwd = os.getcwd()
+
+    try:
+        if is_frozen:
+            # --- FROZEN (.EXE) MODE: Use exec() ---
+            print("\n--- Executing script using exec() [Frozen Mode] ---")
+            script_dir = os.path.dirname(script_path)
+            print(f"Target script: {script_path}")
+            if not os.path.isdir(script_dir):
+                 print(f"ERROR: Script directory '{script_dir}' missing.", file=sys.stderr); return False
+
+            print(f"Attempting to change CWD to: {script_dir}")
+            try:
+                os.chdir(script_dir); print(f"Changed CWD to: {os.getcwd()}")
+                compiled_code = compile(code_string_with_key, script_path, 'exec')
+                exec_globals = {"__file__": script_path, "__name__": "__main__"}
+                exec(compiled_code, exec_globals)
+                print(f"--- Script '{downloaded_script_filename}' finished via exec() ---")
+                execution_successful = True
+            except SystemExit as se:
+                 print(f"--- Script '{downloaded_script_filename}' SystemExit({se.code}) ---")
+                 execution_successful = (se.code == 0 or se.code is None)
+            except Exception as e:
+                print(f"\n!!! ERROR DURING exec() of {script_path}: {e} !!!", file=sys.stderr)
+                traceback.print_exc(file=sys.stderr); execution_successful = False
+            finally:
+                 try: os.chdir(original_cwd); print(f"Restored CWD to: {os.getcwd()}")
+                 except Exception as cd_err: print(f"Warn: Failed restore CWD: {cd_err}", file=sys.stderr)
+
+        else:
+            # --- NORMAL (.PY) MODE: Use subprocess ---
+            print(f"\n--- Executing script via subprocess [Non-Frozen Mode] ---")
+            interpreter_path = sys.executable
+            script_dir = os.path.dirname(script_path)
+            print(f"Interpreter: {interpreter_path}")
+            cmd = [interpreter_path, script_path]
+            print(f"Command: {' '.join(cmd)}")
+            print(f"Working Directory for subprocess: {script_dir}")
+
+            # --- Set PYTHONIOENCODING=UTF-8 for the subprocess environment ---
+            subprocess_env = os.environ.copy()
+            subprocess_env["PYTHONIOENCODING"] = "UTF-8"
+            print("Setting PYTHONIOENCODING=UTF-8 for subprocess environment.")
+            # --- End Environment Modification ---
+
+            process = None
+            try:
+                # Pass the modified environment using the 'env' parameter
+                process = subprocess.run(cmd, cwd=script_dir, capture_output=True, text=True,
+                                         encoding='utf-8', errors='replace', check=False, timeout=300,
+                                         env=subprocess_env) # <<<--- Pass modified env here
+
+                print("\n--- Subprocess Execution Finished ---")
+                print(f"Return Code: {process.returncode}")
+                # Limit preview length to avoid flooding console
+                stdout_preview = (process.stdout or "").strip()[:1000]
+                stderr_preview = (process.stderr or "").strip()[:1500] # Allow more stderr
+                print(f"--- Stdout (preview): ---\n{stdout_preview}{'...' if len(process.stdout or '') > 1000 else ''}")
+                if process.stderr: print(f"--- Stderr (preview): ---\n{stderr_preview}{'...' if len(process.stderr or '') > 1500 else ''}\n------------------------", file=sys.stderr)
+                else: print("--- Stderr: (No output) ---")
+
+                execution_successful = (process.returncode == 0)
+                if not execution_successful: print(f"!!! SCRIPT '{downloaded_script_filename}' FAILED via subprocess (RC: {process.returncode}) !!!", file=sys.stderr)
+
+            except subprocess.TimeoutExpired:
+                 print(f"\n!!! ERROR: Subprocess timed out !!!", file=sys.stderr)
+                 execution_successful = False
+            except Exception as e:
+                print(f"\n!!! ERROR DURING SUBPROCESS LAUNCH/execution: {e} !!!", file=sys.stderr)
+                traceback.print_exc(file=sys.stderr)
+                execution_successful = False
+
+    finally:
+        print(f"--- execute_downloaded_code finished. Overall Success: {execution_successful} ---")
+
+    return execution_successful
+# --- END of updated execute_downloaded_code function ---
+
+# --- Tkinter UI Functions ---
+def clear_window_widgets(window):
+    for widget in window.winfo_children(): widget.destroy()
+
+def on_entry_click(event, entry_widget):
+    if entry_widget.get() == PLACEHOLDER_TEXT:
+        entry_widget.delete(0, "end"); entry_widget.config(fg=FG_COLOR)
+
+def on_focusout(event, entry_widget):
+    if entry_widget.get() == '':
+        entry_widget.delete(0, "end"); entry_widget.insert(0, PLACEHOLDER_TEXT); entry_widget.config(fg=PLACEHOLDER_COLOR)
+
+def capslock_button_callback(window):
+    global SELECTED_CODE_URL
+    print("CAPSLOCK method selected.")
+    SELECTED_CODE_URL = DEFAULT_CODE_URL; window.destroy()
+
+def mouse_method_button_callback(window):
+    global SELECTED_CODE_URL
+    print("MOUSE METHOD selected.")
+    SELECTED_CODE_URL = MOUSE_METHOD_CODE_URL; window.destroy()
+
+def show_choice_view(window):
+    clear_window_widgets(window); window.title("Select Method"); window.geometry("350x150")
+    label = tk.Label(window, text="Choose Execution Method:", bg=BG_COLOR, fg=FG_COLOR); label.pack(pady=20)
+    caps_button = tk.Button(window, text="CAPSLOCK", command=lambda: capslock_button_callback(window),
+                            bg=BG_COLOR, fg=FG_COLOR, activebackground=BUTTON_ACTIVE_BG, activeforeground=FG_COLOR, relief=tk.FLAT, padx=10, pady=5)
+    caps_button.pack(pady=5)
+    mouse_method_button = tk.Button(window, text="MOUSE METHOD", command=lambda: mouse_method_button_callback(window),
+                                   bg=BG_COLOR, fg=FG_COLOR, activebackground=BUTTON_ACTIVE_BG, activeforeground=FG_COLOR, relief=tk.FLAT, padx=10, pady=5)
+    mouse_method_button.pack(pady=5)
+
+def check_access_key_callback(entry_widget, window):
+    global ACCESS_KEY_VALIDATED
+    entered_key = entry_widget.get().strip()
+    if not entered_key or entered_key == PLACEHOLDER_TEXT: messagebox.showerror("Error", "Please enter a key."); return
+
+    print("Checking access key...")
+    valid_keys = get_valid_access_keys()
+    if valid_keys is None: messagebox.showerror("Error", "Failed to fetch valid keys."); return
+
+    if entered_key in valid_keys:
+        print("Access Key VALID."); ACCESS_KEY_VALIDATED = True; show_choice_view(window)
+    else:
+        print("Access Key INVALID."); messagebox.showerror("Error", "Invalid key."); ACCESS_KEY_VALIDATED = False
+        entry_widget.delete(0, tk.END); on_focusout(None, entry_widget)
+
+def create_and_run_gui():
+    window = tk.Tk(); window.title("Enter Key"); window.geometry("350x150"); window.resizable(False, False); window.configure(bg=BG_COLOR)
+    window.eval('tk::PlaceWindow . center')
+    label = tk.Label(window, text="Enter your access key:", bg=BG_COLOR, fg=FG_COLOR); label.pack(pady=10)
+    key_entry = tk.Entry(window, width=35, fg=PLACEHOLDER_COLOR, bg=ENTRY_BG_COLOR, insertbackground=FG_COLOR, relief=tk.FLAT, bd=2)
+    key_entry.insert(0, PLACEHOLDER_TEXT)
+    key_entry.bind('<FocusIn>', lambda ev: on_entry_click(ev, key_entry)); key_entry.bind('<FocusOut>', lambda ev: on_focusout(ev, key_entry)); key_entry.pack(pady=5, padx=10)
+    check_button = tk.Button(window, text="Check Key", command=lambda: check_access_key_callback(key_entry, window),
+                             bg=BG_COLOR, fg=FG_COLOR, activebackground=BUTTON_ACTIVE_BG, activeforeground=FG_COLOR, relief=tk.FLAT, padx=10, pady=5)
+    check_button.pack(pady=15); window.mainloop()
+
+# --- Main Function (Orchestrator) ---
+def main():
+    global ACCESS_KEY_VALIDATED, SELECTED_CODE_URL, GOOGLE_API_KEY_VALUE
+
+    # --- Initial Google API Key Check ---
+    placeholder_keys = ["YOUR_GOOGLE_API_KEY_HERE", "PASTE_YOUR_REAL_GOOGLE_AI_API_KEY_HERE", ""]
+    current_key = GOOGLE_API_KEY_VALUE.strip()
+    if not current_key or any(p in current_key for p in placeholder_keys if p):
+        err_msg = "CRITICAL SETUP ERROR: Google AI API Key missing or placeholder.\nPlease replace placeholder in checker script."
+        print("!"*60 + f"\n!!! {err_msg} !!!\n" + "!"*60)
+        try: root = tk.Tk(); root.withdraw(); messagebox.showerror("Setup Error", err_msg); root.destroy()
+        except Exception as gui_err: print(f"(Could not display GUI error: {gui_err})", file=sys.stderr)
+        sys.exit(1)
+
+    # --- Run GUI ---
+    print("Starting UI for access key authentication...")
+    create_and_run_gui()
+
+    # --- Check UI Completion ---
+    if not ACCESS_KEY_VALIDATED: print("Access key not validated. Exiting."); sys.exit(0)
+    if not SELECTED_CODE_URL: print("Method not selected. Exiting."); sys.exit(0)
+
+    method_name = "Unknown"
+    hash_file_suffix = "unknown"
+    if SELECTED_CODE_URL == DEFAULT_CODE_URL: method_name, hash_file_suffix = "CAPSLOCK", "capslock_method"
+    elif SELECTED_CODE_URL == MOUSE_METHOD_CODE_URL: method_name, hash_file_suffix = "MOUSE METHOD", "mouse_method"
+    print(f"\nAccess Key OK & Method chosen ({method_name}). Proceeding to background checker...\n")
+
+    # --- Setup Paths ---
+    checker_data_dir = get_checker_data_dir()
+    if not checker_data_dir: print("CRITICAL: Could not determine data directory. Exiting.", file=sys.stderr); sys.exit(1)
+    hash_file = os.path.join(checker_data_dir, HASH_FILE_TEMPLATE.format(hash_file_suffix)); print(f"Using hash file: {hash_file}")
+    documents_folder = get_documents_folder()
+    if not documents_folder: print("Failed to get Documents folder. Exiting."); sys.exit(1)
+    dl_filename = os.path.basename(SELECTED_CODE_URL); dl_filename += ".py" if not os.path.splitext(dl_filename)[1] else ""
+    print(f"Target directory for {dl_filename}: {documents_folder}")
+
+    # --- Admin Check ---
+    is_admin = False
+    try:
+        if os.name == 'nt': is_admin = ctypes.windll.shell32.IsUserAnAdmin() != 0; print(f"\nRunning as admin: {is_admin}")
+        else: print("\nNon-Windows OS. Admin check skipped.")
+        if not is_admin: print(f"WARNING: Not running as admin. '{dl_filename}' might require admin rights.")
+    except Exception as e: print(f"\nWarning: Error checking admin status: {e}.")
+
+    # --- Background Loop ---
+    last_known_hash = read_last_hash(hash_file); print(f"Initial hash for {method_name}: {last_known_hash or 'None'}")
+    print(f"\nStarting checker loop for {method_name}. Checking every {CHECK_INTERVAL_SECONDS}s.")
+    print("(Running silently in background)")
+
+    while True:
+        try:
+            print(f"\n[{time.strftime('%Y-%m-%d %H:%M:%S')}] --- {method_name} Cycle Start ---")
+            current_base_code = fetch_remote_data(SELECTED_CODE_URL, f"base code for {method_name}")
+            if current_base_code is not None:
+                current_hash = calculate_hash(current_base_code); print(f"Fetched base code. Hash: {current_hash}")
+                if current_hash != last_known_hash:
+                    print(f">>> Hash mismatch! Update required.")
+                    code_with_key = inject_api_key(current_base_code, GOOGLE_API_KEY_VALUE)
+                    if code_with_key:
+                        # Execute with the updated function (handles encoding)
+                        execution_successful = execute_downloaded_code(code_with_key, SELECTED_CODE_URL, documents_folder)
+                        if execution_successful:
+                            print("Execution successful. Updating hash.")
+                            if write_last_hash(hash_file, current_hash): last_known_hash = current_hash
+                            else: print("Error: Failed writing updated hash file.", file=sys.stderr)
+                        else: print(f"Execution FAILED for {method_name}. Hash NOT updated.")
+                    else: print("!!! CRITICAL: Failed to inject API key. Hash NOT updated.", file=sys.stderr); time.sleep(CHECK_INTERVAL_SECONDS*2)
+                else: print("Base code hash matches. No update needed.")
+            else: print(f"Fetch failed for {method_name}. Will retry.")
+
+            print(f"--- {method_name} Cycle End --- Waiting {CHECK_INTERVAL_SECONDS}s...")
+            time.sleep(CHECK_INTERVAL_SECONDS)
+
+        except KeyboardInterrupt: print("\nCtrl+C received. Exiting checker."); break
+        except Exception as loop_err:
+            print(f"\n!!! UNEXPECTED ERROR IN CHECKER LOOP ({method_name}): {loop_err} !!!", file=sys.stderr)
+            traceback.print_exc(file=sys.stderr); print(f"Continuing after {CHECK_INTERVAL_SECONDS}s..."); time.sleep(CHECK_INTERVAL_SECONDS)
 
 # --- Script Entry Point ---
 if __name__ == "__main__":
-    print("="*60 + "\n== Gemini Text + OCR Mouse Mover (Mouse Method) ==\n" + "="*60)
-    print("\n=== Phase 1: Setup Checks ==="); start_time_main = time.time()
-    if not check_windows(): sys.exit(1)
-    if not check_python_version(): sys.exit(1)
-    # Install_libraries now also imports easyocr, numpy etc if found
-    if not install_libraries(): print("\nSetup failed: Libs.", file=sys.stderr); sys.exit(1)
-    print(f"\n--- Setup OK ({time.time()-start_time_main:.2f}s) ---")
-    print("\n=== Phase 2: Starting Main App ===")
-    # run_main_application now also initializes OCR
-    run_main_application()
-    print(f"\n=== App Finished ({time.time()-start_time_main:.2f}s total) ===")
+    try:
+        main()
+    except KeyboardInterrupt: print("\nExiting checker script (Ctrl+C)."); sys.exit(0)
+    except Exception as e:
+        print(f"\n!!! UNHANDLED CRITICAL ERROR DURING SCRIPT SETUP !!!", file=sys.stderr)
+        print(f"Error Type: {type(e).__name__}: {e}", file=sys.stderr); traceback.print_exc(file=sys.stderr)
+        try: root = tk.Tk(); root.withdraw(); messagebox.showerror("Critical Runtime Error", f"Setup Error:\n{type(e).__name__}: {e}"); root.destroy()
+        except Exception as tk_err: print(f"(GUI error msg failed: {tk_err})", file=sys.stderr)
+        sys.exit(1)
