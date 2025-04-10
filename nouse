@@ -1,11 +1,10 @@
-# mouse_method.py (or nouse.py) - v4 (Focus on Indentation Fix)test
+# mouse_method.py (or nouse.py) - v5 (Simplified Screenshot Handling)test
 # Takes a screenshot on trigger, asks AI for the location of the correct MC answer,
 # and moves the mouse cursor to that location.
 
 import sys
 import os
 import platform
-# import subprocess # Not directly used in this version
 import importlib
 import time
 import threading
@@ -15,34 +14,26 @@ import traceback
 import re # For parsing coordinates
 
 # --- Attempt to Import Core Libraries ---
-# Try importing essential libraries early to catch missing ones.
 try:
-    import keyboard         # For triggering
-    import mss              # For screenshots
+    import keyboard
+    import mss
     import mss.tools
     from PIL import Image
     import google.generativeai as genai
     import google.api_core.exceptions
-    import pyautogui        # For mouse control
+    import pyautogui
 except ImportError as e:
-    print(f"[Startup Info] Initial import check failed for '{e.name}'. Installation verification needed.")
+    print(f"[Startup Info] Initial import check failed for '{e.name}'.")
     keyboard = mss = Image = genai = google = pyautogui = None
 
 # --- Configuration ---
 GOOGLE_API_KEY = "YOUR_GOOGLE_API_KEY_HERE" # <<<--- CHECKER INJECTS HERE
 
-# Setup Config
-REQUIRED_LIBRARIES = [
-    "keyboard", "mss", "Pillow", "google-generativeai", "pyautogui",
-]
-
-# Main App Config
+REQUIRED_LIBRARIES = ["keyboard", "mss", "Pillow", "google-generativeai", "pyautogui"]
 TRIGGER_KEY = '='
 SUPPRESS_TRIGGER = True
 AI_MODEL_NAME = "gemini-1.5-flash-latest"
-# AI_MODEL_NAME = "gemini-1.5-pro-latest" # Uncomment to use Pro model
-
-# Mouse Movement Config
+# AI_MODEL_NAME = "gemini-1.5-pro-latest"
 MOUSE_MOVE_DURATION = 0.25
 
 # --- State ---
@@ -53,176 +44,102 @@ running = True
 
 def check_windows():
     print("--- Checking Operating System ---")
-    if platform.system() != "Windows":
-        print(f"ERROR: This script is designed ONLY for Windows. Detected OS: {platform.system()}. Exiting.")
-        return False
-    print("Operating System: Windows (OK).")
-    return True
+    if platform.system() != "Windows": print("ERROR: Windows only."); return False
+    print("OS: Windows (OK)."); return True
 
 def check_python_version():
     print("\n--- Checking Python Version ---")
-    if sys.version_info < (3, 8):
-        print(f"ERROR: Python 3.8+ recommended. You are using {platform.python_version()}. Exiting.")
-        return False
-    print(f"Python version {platform.python_version()} is sufficient.")
-    return True
+    if sys.version_info < (3, 8): print(f"ERROR: Python 3.8+ required."); return False
+    print(f"Python {platform.python_version()} OK."); return True
 
 def install_libraries():
     print("\n--- Verifying Required Libraries ---")
     all_found = True
-    libs_to_import = {}
-
     for lib in REQUIRED_LIBRARIES:
         import_name = lib
         if lib == 'Pillow': import_name = 'PIL'
         elif lib == 'google-generativeai': import_name = 'google.generativeai'
-
         try:
             spec = importlib.util.find_spec(import_name)
-            if spec is None:
-                 print(f"- '{lib}' NOT FOUND.")
-                 all_found = False
-            else:
-                 print(f"- '{lib}' found.")
-                 libs_to_import[lib] = import_name
-        except Exception as e:
-             print(f"  Warning: Error checking for library '{lib}': {e}")
-             all_found = False
+            if spec is None: print(f"- '{lib}' NOT FOUND."); all_found = False
+            else: print(f"- '{lib}' found.")
+        except Exception as e: print(f"Warn: Error checking '{lib}': {e}"); all_found = False
 
-    if not all_found:
-        print("\nERROR: One or more required libraries were not found.", file=sys.stderr)
-        print("The initial installation process via the launcher might have failed.", file=sys.stderr)
-        return False
+    if not all_found: print("\nERROR: Libs missing.", file=sys.stderr); return False
     else:
-        print("All required libraries appear to be installed.")
+        print("All required libs appear installed. Importing...")
         try:
-            print("Attempting final imports...")
             global keyboard, mss, mss_tools, Image, genai, google_api_core_exceptions, pyautogui
-            import keyboard
-            import mss
-            import mss.tools as mss_tools
-            from PIL import Image
-            import google.generativeai as genai
-            import google.api_core.exceptions as google_api_core_exceptions
+            import keyboard, mss, mss.tools as mss_tools, PIL.Image as Image
+            import google.generativeai as genai, google.api_core.exceptions as google_api_core_exceptions
             import pyautogui
-
-            pyautogui.FAILSAFE = False
-            print(f"PyAutoGUI FAILSAFE set to {pyautogui.FAILSAFE}")
-            print("Core libraries imported successfully.")
-            return True
-        except ImportError as e:
-             print(f"ERROR: Library '{e.name}' found but failed final import.", file=sys.stderr)
-             traceback.print_exc(file=sys.stderr)
-             return False
-        except Exception as e:
-             print(f"ERROR: Unexpected error during final library import: {e}", file=sys.stderr)
-             traceback.print_exc(file=sys.stderr)
-             return False
+            pyautogui.FAILSAFE = False; print(f"PyAutoGUI FAILSAFE={pyautogui.FAILSAFE}")
+            print("Core libs imported."); return True
+        except Exception as e: print(f"ERROR: Final import failed: {e}", file=sys.stderr); return False
 
 # === MAIN APPLICATION FUNCTIONS ===
 
 def move_mouse_to_answer(box_coords, monitor_info):
+    # [ Code for move_mouse_to_answer remains the same as v4 ]
+    # [ Ensure this function's indentation is correct if modifying ]
     print("--- Attempting Mouse Movement ---")
     global running, pyautogui
-    if pyautogui is None:
-        print("ERROR: PyAutoGUI library not loaded.", file=sys.stderr); return False
-    if not box_coords or len(box_coords) != 4:
-        print(f"ERROR: Invalid coordinates: {box_coords}", file=sys.stderr); return False
-
+    if pyautogui is None: print("ERROR: PyAutoGUI not loaded.", file=sys.stderr); return False
+    if not box_coords or len(box_coords) != 4: print(f"ERROR: Invalid coords: {box_coords}", file=sys.stderr); return False
     try:
         x_min, y_min, x_max, y_max = map(int, box_coords)
-        if x_min >= x_max or y_min >= y_max:
-             print(f"ERROR: Invalid box coords (min >= max): {box_coords}", file=sys.stderr); return False
-
-        center_x_rel = (x_min + x_max) // 2
-        center_y_rel = (y_min + y_max) // 2
-        absolute_x = monitor_info['left'] + center_x_rel
-        absolute_y = monitor_info['top'] + center_y_rel
-
-        print(f"Target Box (rel): [{x_min},{y_min},{x_max},{y_max}]")
-        print(f"Calculated Abs Coords: ({absolute_x}, {absolute_y})")
+        if x_min >= x_max or y_min >= y_max: print(f"ERROR: Invalid box (min>=max): {box_coords}", file=sys.stderr); return False
+        center_x_rel = (x_min + x_max) // 2; center_y_rel = (y_min + y_max) // 2
+        absolute_x = monitor_info['left'] + center_x_rel; absolute_y = monitor_info['top'] + center_y_rel
+        print(f"Target Box(rel): [{x_min},{y_min},{x_max},{y_max}], Abs Coords: ({absolute_x}, {absolute_y})")
         print(f"Executing pyautogui.moveTo({absolute_x}, {absolute_y}, duration={MOUSE_MOVE_DURATION})...")
         pyautogui.moveTo(absolute_x, absolute_y, duration=MOUSE_MOVE_DURATION)
-        final_x, final_y = pyautogui.position()
-        print(f"Current position after move: ({final_x}, {final_y})")
-        if abs(final_x - absolute_x) > 5 or abs(final_y - absolute_y) > 5:
-             print("Warning: Mouse position differs significantly from target.")
-        print("--- Mouse Movement Attempt Finished ---")
-        return True
-    except Exception as e:
-        print(f"!!! ERROR during mouse movement: {type(e).__name__}: {e} !!!", file=sys.stderr)
-        print("    Check Admin privileges.", file=sys.stderr)
-        traceback.print_exc(file=sys.stderr)
-        print("--- Mouse Movement Attempt Failed ---")
-        return False
+        final_x, final_y = pyautogui.position(); print(f"Pos after move: ({final_x}, {final_y})")
+        if abs(final_x - absolute_x) > 5 or abs(final_y - absolute_y) > 5: print("Warn: Mouse pos differs from target.")
+        print("--- Mouse Move Attempt Finished ---"); return True
+    except Exception as e: print(f"!!! ERROR during mouse move: {e}", file=sys.stderr); return False
+
 
 def get_answer_location_from_ai(pil_image):
-    print(f"--- Asking AI ({AI_MODEL_NAME}) for Answer Location ---")
-    global running, genai, google_api_core_exceptions, GOOGLE_API_KEY, AI_MODEL_NAME
-    if not running: print("AI call skipped: Shutdown."); return None
-    if genai is None: print("ERROR: Google AI lib not loaded.", file=sys.stderr); return None
-
+    # [ Code for get_answer_location_from_ai remains the same as v4 ]
+    # [ Ensure this function's indentation is correct if modifying ]
+    print(f"--- Asking AI ({AI_MODEL_NAME}) for Location ---")
+    global running, genai, GOOGLE_API_KEY
+    if not running: print("AI skipped: Shutdown."); return None
+    if genai is None: print("ERROR: GenAI lib not loaded.", file=sys.stderr); return None
     try:
-         if 'GOOGLE_API_KEY' not in globals() or not GOOGLE_API_KEY or GOOGLE_API_KEY == "YOUR_GOOGLE_API_KEY_HERE":
-             raise NameError("GOOGLE_API_KEY not defined or placeholder")
-    except NameError:
-         print("!!! FATAL ERROR: GOOGLE_API_KEY not found/invalid.", file=sys.stderr); return None
-
+         if 'GOOGLE_API_KEY' not in globals() or not GOOGLE_API_KEY or GOOGLE_API_KEY == "YOUR_GOOGLE_API_KEY_HERE": raise NameError("API Key missing")
+    except NameError: print("!!! FATAL: API Key missing/invalid.", file=sys.stderr); return None
     try: model = genai.GenerativeModel(AI_MODEL_NAME)
-    except Exception as e: print(f"ERROR: Failed to init Gemini model: {e}", file=sys.stderr); return None
-
+    except Exception as e: print(f"ERROR: Failed init Gemini: {e}", file=sys.stderr); return None
     prompt = """
-Analyze the provided image containing a multiple-choice question.
-1. Read the question and all answer options (A, B, C, D...).
-2. Use internal knowledge to determine the single best correct answer option.
-3. Identify the bounding box coordinates (top-left x, top-left y, bottom-right x, bottom-right y) for the *entire text* of that single correct answer option. Coordinates must be integers relative to the image (origin 0,0 top-left).
-4. Respond ONLY with coordinates: BOX=[xmin,ymin,xmax,ymax]
-   Example: BOX=[150,300,450,325]
-5. If unsure or unable, respond ONLY with: ERROR
-Do not provide letter, explanation, or other text. Just BOX=[...] or ERROR.
+Analyze image: MC question. 1. Read Q&A. 2. Use knowledge for best answer.
+3. ID bounding box (xmin,ymin,xmax,ymax) for *entire text* of the correct answer option. Coords relative to image (0,0 top-left).
+4. Respond ONLY: BOX=[xmin,ymin,xmax,ymax] Example: BOX=[150,300,450,325]
+5. If unsure/cannot, respond ONLY: ERROR
+No letter/explanation. Just BOX=[...] or ERROR.
 """
-    ai_response_text = "ERROR"
     try:
-        print(f"Sending image/prompt to Gemini '{AI_MODEL_NAME}'...")
-        start_time = time.time()
-        response = model.generate_content(
-            [prompt, pil_image],
-            generation_config=genai.types.GenerationConfig(temperature=0.0),
-            request_options={'timeout': 120}
-        )
-        duration = time.time() - start_time
-        print(f"Gemini response received in {duration:.2f}s.")
-
+        print(f"Sending prompt to Gemini '{AI_MODEL_NAME}'..."); start_time = time.time()
+        response = model.generate_content([prompt, pil_image], generation_config=genai.types.GenerationConfig(temperature=0.0), request_options={'timeout': 120})
+        duration = time.time() - start_time; print(f"Gemini response in {duration:.2f}s.")
         raw_response_text = "Unavailable"
         if response.candidates:
             try: raw_response_text = response.text
-            except Exception as e_text: raw_response_text = f"Blocked or error accessing text: {e_text}. Feedback: {response.prompt_feedback}"
+            except Exception as e_text: raw_response_text = f"Blocked/Error: {e_text}. Feedback: {response.prompt_feedback}"
         else: raw_response_text = f"No candidates. Feedback: {response.prompt_feedback}"
-        print(f"AI Raw Response: '{raw_response_text}'")
-        ai_response_text = raw_response_text.strip()
-
-        if "ERROR" in ai_response_text.upper():
-             print("AI explicitly responded ERROR.")
-             return None
-
-        print("Attempting to parse coordinates...")
+        print(f"AI Raw: '{raw_response_text}'"); ai_response_text = raw_response_text.strip()
+        if "ERROR" in ai_response_text.upper(): print("AI responded ERROR."); return None
         match = re.search(r"BOX\s*=\s*\[\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*\]", ai_response_text)
         if match:
             coords = [int(c) for c in match.groups()]
-            if coords[0] < coords[2] and coords[1] < coords[3]:
-                 print(f"Successfully Parsed Coords: {coords}")
-                 print("--- AI Location Query Finished (Success) ---")
-                 return coords
-            else: print(f"Parsed coords invalid (min>=max): {coords}"); return None
+            if coords[0] < coords[2] and coords[1] < coords[3]: print(f"Parsed Coords: {coords}"); return coords
+            else: print(f"Parsed invalid coords: {coords}"); return None
         else: print("AI response format mismatch."); return None
+    except Exception as e: print(f"!!! ERROR during Gemini call: {e}", file=sys.stderr); return None
 
-    except google.api_core.exceptions.PermissionDenied as e: print(f"!!! ERROR API: Permission Denied. Check Key/API enabled. {e}", file=sys.stderr); return None
-    except google.api_core.exceptions.ResourceExhausted as e: print(f"!!! ERROR API: Quota Exceeded. {e}", file=sys.stderr); return None
-    except google.api_core.exceptions.DeadlineExceeded as e: print(f"!!! ERROR API: Timeout. {e}", file=sys.stderr); return None
-    except google.api_core.exceptions.InvalidArgument as e: print(f"!!! ERROR API: Invalid Argument. {e}", file=sys.stderr); return None
-    except ValueError as ve: print(f"!!! ERROR: Gemini response blocked (safety?). {ve}", file=sys.stderr); return None
-    except Exception as e: print(f"!!! UNEXPECTED ERROR during Gemini call: {type(e).__name__}: {e}", file=sys.stderr); traceback.print_exc(file=sys.stderr); return None
 
+# --- Simplified process_screenshot_and_move_mouse (No inner try/except) ---
 def process_screenshot_and_move_mouse():
     print("\n=== Starting Screenshot and Processing Cycle ===")
     global running, mss, Image, process_lock, pyautogui, keyboard
@@ -230,62 +147,81 @@ def process_screenshot_and_move_mouse():
     start_time = time.time()
     lock_released = False
 
-    # Release lock helper function
     def release_lock_if_held(reason=""):
         nonlocal lock_released
         if process_lock.locked():
-            try: process_lock.release(); print(f"Lock released: {reason}")
+            try:
+                process_lock.release()
+                print(f"Lock released: {reason}")
+                lock_released = True # Mark as released by this helper
             except RuntimeError: print(f"Warn: Lock release failed ({reason}) - not owned?")
-            lock_released = True
+            # Do not set lock_released=True if release fails
 
+    # --- Outer Try block starts ---
     try:
         # 1. Check Libs
         if not all([mss, Image, pyautogui, keyboard]):
-            print("ERROR: Core libs not available.", file=sys.stderr); return
+            print("ERROR: Core libs not available.", file=sys.stderr)
+            return # Exit early
 
-        # 2. Take Screenshot
+        # 2. Take Screenshot (Simplified: No inner try/except)
+        # Errors here might leave screenshot_pil_img as None
         print("Taking screenshot...")
-        with mss.mss() as sct:
-            monitor_index = 1 if len(sct.monitors) > 1 else 0
-            if not sct.monitors: print("FATAL: No monitors detected.", file=sys.stderr); return
-            monitor_info = sct.monitors[monitor_index]
-            print(f"Using monitor {monitor_index}: {monitor_info}")
-            sct_img = sct.grab(monitor_info)
-            print(f"Captured ({sct_img.width}x{sct_img.height}). Converting...")
-            screenshot_pil_img = Image.frombytes("RGB", sct_img.size, sct_img.bgra, "raw", "BGRX")
-            print("Screenshot converted.")
+        screenshot_exception = None
+        try: # Add minimal try/except just to catch screenshot errors for logging
+            with mss.mss() as sct:
+                monitor_index = 1 if len(sct.monitors) > 1 else 0
+                if not sct.monitors:
+                    print("FATAL: No monitors detected.", file=sys.stderr)
+                    return # Exit early
+                monitor_info = sct.monitors[monitor_index]
+                print(f"Using monitor {monitor_index}: {monitor_info}")
+                sct_img = sct.grab(monitor_info)
+                print(f"Captured ({sct_img.width}x{sct_img.height}). Converting...")
+                screenshot_pil_img = Image.frombytes("RGB", sct_img.size, sct_img.bgra, "raw", "BGRX")
+                print("Screenshot converted.")
+        except Exception as scr_e:
+            screenshot_exception = scr_e # Store exception
+            print(f"!!! ERROR during screenshot block: {type(scr_e).__name__}: {scr_e}", file=sys.stderr)
+            # Don't return yet, let checks below handle None image
 
-    except Exception as e:
-         print(f"!!! ERROR during screenshot: {type(e).__name__}: {e}", file=sys.stderr)
-         if isinstance(e, mss.ScreenShotError): pass # Already specific
-         else: traceback.print_exc(file=sys.stderr)
-         # Fall through to checks below
+        # 3. Check state before AI (Check running flag AND if screenshot succeeded)
+        if not running:
+            print("Interrupted after screenshot attempt.")
+            return # Exit early
+        if screenshot_pil_img is None:
+            print(f"Screenshot failed (PIL None){f': {screenshot_exception}' if screenshot_exception else ''}.")
+            return # Exit early
 
-    # 3. Check state before AI
-    if not running: print("Interrupted after screenshot attempt."); return
-    if screenshot_pil_img is None: print("Screenshot failed (PIL None)."); return
+        # 4. Get AI Location
+        coords = get_answer_location_from_ai(screenshot_pil_img)
 
-    # 4. Get AI Location
-    coords = get_answer_location_from_ai(screenshot_pil_img)
+        # 5. Check state after AI
+        if not running:
+            print("Interrupted after AI call.")
+            return # Exit early
 
-    # 5. Check state after AI
-    if not running: print("Interrupted after AI call."); return
+        # 6. Move Mouse
+        if coords and monitor_info:
+            move_mouse_to_answer(coords, monitor_info)
+        elif coords is None:
+            print("No valid coords from AI. Mouse not moved.")
+        else: # Should be unreachable if coords is None, but safety
+            print("Cannot move mouse: Coords/Monitor info missing.")
 
-    # 6. Move Mouse
-    if coords and monitor_info:
-        move_mouse_to_answer(coords, monitor_info)
-    elif coords is None: print("No valid coords from AI. Mouse not moved.")
-    else: print("Cannot move mouse: Coords/Monitor info missing.")
-
-    # 7. Final Cleanup (inside finally)
+    # --- Outer Finally block starts ---
     finally:
+        # 7. Final Cleanup (Always runs)
         cycle_duration = time.time() - start_time
         print(f"Processing cycle finished in {cycle_duration:.2f}s.")
-        release_lock_if_held("End of cycle") # Ensure release
+        # Ensure lock is released, calling helper which checks if already done
+        release_lock_if_held("End of cycle")
         print("=== Screenshot and Processing Cycle Complete ===")
+    # --- Outer Finally block ends ---
 
 
 def handle_trigger():
+    # [ Code for handle_trigger remains the same as v4 ]
     global running, process_lock
     if not running: print("Trigger ignored: Shutdown."); return
     print(f"\n'{TRIGGER_KEY}' key detected!")
@@ -295,134 +231,76 @@ def handle_trigger():
         thread.start()
     else: print("Processing already in progress. Ignoring trigger.")
 
+
 def signal_handler(sig, frame):
+    # [ Code for signal_handler remains the same as v4 ]
     global running
     if running: print("\n!!! Shutdown signal received !!!"); running = False
 
+
 # === MAIN EXECUTION BLOCK ===
 def run_main_application():
+    # [ Code for run_main_application remains the same as v4 ]
+    # [ Ensure indentation within its try/except/finally is correct ]
     global running, genai, GOOGLE_API_KEY, keyboard, pyautogui
     print("\n--- Starting Gemini Mouse Mover Application ---")
-
-    # --- Configure Google AI ---
-    api_key_status = "NOT CONFIGURED"
-    try:
-        if 'GOOGLE_API_KEY' not in globals() or not GOOGLE_API_KEY or GOOGLE_API_KEY == "YOUR_GOOGLE_API_KEY_HERE":
-            raise NameError("GOOGLE_API_KEY variable missing or placeholder.")
-        if genai is None: raise ImportError("Google GenAI lib not loaded.")
+    try: # Configure AI
+        if 'GOOGLE_API_KEY' not in globals() or not GOOGLE_API_KEY or GOOGLE_API_KEY == "YOUR_GOOGLE_API_KEY_HERE": raise NameError("API Key missing")
+        if genai is None: raise ImportError("GenAI lib missing")
         print(f"Configuring Google AI SDK (model: {AI_MODEL_NAME})...")
-        genai.configure(api_key=GOOGLE_API_KEY)
-        print("Google AI SDK configured successfully.")
-        api_key_status = "OK"
-    except Exception as e:
-        print(f"!!! FATAL ERROR configuring Google AI: {type(e).__name__}: {e} !!!", file=sys.stderr)
-        if "api key not valid" in str(e).lower(): print("   >>> Injected API key invalid.", file=sys.stderr)
-        return # Cannot continue
+        genai.configure(api_key=GOOGLE_API_KEY); print("SDK Configured.")
+    except Exception as e: print(f"!!! FATAL ERROR config AI: {e}", file=sys.stderr); return
 
-    # --- Direct PyAutoGUI Test ---
-    print("\n--- Performing Quick PyAutoGUI Mouse Test ---")
+    print("\n--- Performing Quick PyAutoGUI Test ---") # PyAutoGUI Test
     try:
-        if pyautogui is None: raise ImportError("PyAutoGUI lib not loaded.")
-        start_x, start_y = pyautogui.position()
-        print(f"Start pos: ({start_x}, {start_y}). Moving slightly...")
-        pyautogui.moveRel(10, 10, duration=0.1); time.sleep(0.1)
-        end_x, end_y = pyautogui.position()
-        print(f"End pos: ({end_x}, {end_y}). Moving back...")
-        pyautogui.moveTo(start_x, start_y, duration=0.1); time.sleep(0.1)
-        final_x, final_y = pyautogui.position()
-        print(f"Final pos: ({final_x}, {final_y})")
-        if abs(end_x - (start_x+10)) < 5 and abs(end_y - (start_y+10)) < 5 and abs(final_x-start_x) < 5 and abs(final_y-start_y) < 5:
-             print("PyAutoGUI test SUCCESSFUL.")
-        else: print("!!! PyAutoGUI test WARNING: Mouse move inaccurate. Permissions issue likely !!!")
-    except Exception as e_test:
-        print(f"!!! PyAutoGUI test FAILED: {type(e_test).__name__}: {e_test} !!!", file=sys.stderr)
-        print("!!! Check Admin privileges for LAUNCHER script. !!!")
+        if pyautogui is None: raise ImportError("PyAutoGUI lib missing")
+        start_x, start_y = pyautogui.position(); print(f"Start:({start_x},{start_y}). Moving...");
+        pyautogui.moveRel(10, 10, duration=0.1); time.sleep(0.1); end_x, end_y = pyautogui.position()
+        print(f"End:({end_x},{end_y}). Moving back..."); pyautogui.moveTo(start_x, start_y, duration=0.1); time.sleep(0.1)
+        final_x, final_y = pyautogui.position(); print(f"Final:({final_x},{final_y})")
+        if abs(end_x-(start_x+10))<5 and abs(final_x-start_x)<5 : print("PyAutoGUI test SUCCESSFUL.")
+        else: print("!!! PyAutoGUI test WARNING: Move inaccurate. Permissions? !!!")
+    except Exception as e_test: print(f"!!! PyAutoGUI test FAILED: {e_test}", file=sys.stderr)
     print("--- PyAutoGUI Test Complete ---")
 
-    # --- Setup Signal Handler ---
     print("\nSetting up signal handler (Ctrl+C)..."); signal.signal(signal.SIGINT, signal_handler); print("Handler set.")
 
-    # --- Setup Keyboard Listener ---
-    # >>>>>>>> START OF THE TRY BLOCK (Listener Setup & Main Loop) <<<<<<<<<<
-    # ENSURE INDENTATION IS CORRECT HERE
+    # --- Setup Listener & Main Loop ---
     print("\n--- Setting up Keyboard Listener ---")
     listener_success = False
-    try:
-        # Indent contents of 'try' one level
-        if keyboard is None: raise ImportError("'keyboard' lib not loaded.")
-
-        print("\n" + "="*60)
-        print("IMPORTANT: Waiting for '{TRIGGER_KEY}' key press.")
-        print("           Ensure LAUNCHER was run 'As Administrator'")
-        print("           for keyboard/mouse control to work reliably.")
-        print("="*60 + "\n")
-
+    try: # >>>>> OUTER TRY for listener/loop <<<<<<
+        if keyboard is None: raise ImportError("'keyboard' lib missing.")
+        print("\n"+"="*60+"\nIMPORTANT: Waiting for '{TRIGGER_KEY}'. Run LAUNCHER As Admin!\n"+"="*60+"\n")
         keyboard.add_hotkey(TRIGGER_KEY, handle_trigger, trigger_on_release=False, suppress=SUPPRESS_TRIGGER)
-        print(f"Keyboard listener active.")
-        listener_success = True
-
-        print("Entering main loop (waiting for trigger or Ctrl+C)...")
-        while running:
-            time.sleep(0.5) # Keep main thread alive
-        # This print is still inside the 'try' block
-        print("Main loop exited (running flag is False).")
-
-    # >>>>>>>> EXCEPT BLOCKS (Aligned with 'try') <<<<<<<<<<
-    # ENSURE INDENTATION IS CORRECT HERE (Same level as 'try')
-    except ImportError as e:
-        # Indent contents of 'except' one level
-        print(f"\n!!! ERROR: Required lib '{e.name}' unavailable for listener setup.", file=sys.stderr)
-        running = False
-    except Exception as e:
-        # Indent contents of 'except' one level
-        print(f"\n!!! ERROR during listener setup/main loop: {type(e).__name__}: {e} !!!", file=sys.stderr)
-        e_str = str(e).lower()
-        if isinstance(e, OSError) or "permissions" in e_str or "admin" in e_str or "access denied" in e_str:
-             print(">>> FAILURE LIKELY DUE TO MISSING ADMIN PERMISSIONS. <<<", file=sys.stderr)
-             print(">>> Run LAUNCHER as Administrator. <<<", file=sys.stderr)
+        print("Listener active."); listener_success = True
+        print("Entering main loop..."); while running: time.sleep(0.5)
+        print("Main loop exited.")
+    except ImportError as e: # >>>>> EXCEPT (aligned with try) <<<<<<
+        print(f"\n!!! ERROR: Lib '{e.name}' unavailable.", file=sys.stderr); running = False
+    except Exception as e: # >>>>> EXCEPT (aligned with try) <<<<<<
+        print(f"\n!!! ERROR listener/loop: {e} !!!", file=sys.stderr)
+        e_str=str(e).lower();import platform
+        if isinstance(e, OSError) or "permission" in e_str or "admin" in e_str: print(">>> Check Admin Privs! <<<", file=sys.stderr)
         else: traceback.print_exc(file=sys.stderr)
         running = False
+    finally: # >>>>> FINALLY (aligned with try) <<<<<<
+        print("\n--- Script Stopping: Cleaning Up ---")
+        running = False
+        if process_lock.locked(): print("Releasing lock..."); try: process_lock.release() catch Exception as lock_err: print(f"Warn: {lock_err}")
+        print("Cleaning up kbd hooks...");
+        if listener_success and keyboard: try: keyboard.unhook_all(); print("Hooks removed.") catch Exception as uh_e: print(f"Warn: {uh_e}", file=sys.stderr)
+        else: print("Skipping kbd unhook.")
+        print("--- Cleanup Complete ---")
 
-    # >>>>>>>> FINALLY BLOCK (Aligned with 'try' and 'except') <<<<<<<<<<
-    # ENSURE INDENTATION IS CORRECT HERE (Same level as 'try')
-    finally:
-        # Indent contents of 'finally' one level
-        print("\n--- Script Stopping: Cleaning Up (Mouse Method) ---")
-        running = False # Ensure flag is set
-
-        if process_lock.locked():
-            print("Releasing process lock during final cleanup...")
-            try: process_lock.release()
-            except Exception as lock_err: print(f" - Warn: Error releasing lock on exit: {lock_err}")
-
-        print("Cleaning up keyboard hooks...")
-        if listener_success and keyboard:
-            try: keyboard.unhook_all(); print("Keyboard hooks removed.")
-            except Exception as uh_e: print(f" - Warn: Error during kbd unhooking: {uh_e}", file=sys.stderr)
-        else: print(" - Skipping keyboard unhooking (setup failed or lib missing).")
-        print("--- Cleanup Complete. Exiting Mouse Method Script. ---")
 
 # --- Script Entry Point ---
 if __name__ == "__main__":
-    # ENSURE INDENTATION IS CORRECT HERE (No indent for top-level code)
-    print("="*60)
-    print("== Gemini Mouse Mover for Multiple Choice (Mouse Method) ==")
-    print("="*60)
-
-    print("\n=== Phase 1: Setup Checks ===")
+    print("="*60 + "\n== Gemini Mouse Mover MC (Mouse Method) ==\n" + "="*60)
+    print("\n=== Phase 1: Setup Checks ==="); start_time_main = time.time()
     if not check_windows(): sys.exit(1)
     if not check_python_version(): sys.exit(1)
-    if not install_libraries():
-        print("\nSetup failed: Lib check/import failed.", file=sys.stderr)
-        try:
-             import tkinter as tk; from tkinter import messagebox
-             root = tk.Tk(); root.withdraw()
-             messagebox.showerror("Library Error", "Required Python libraries missing/failed.\nCheck launcher setup & console output.")
-             root.destroy()
-        except Exception: pass
-        sys.exit(1)
-
-    print("\n--- Setup Phase Complete ---")
-    print("\n=== Phase 2: Starting Main Application ===")
+    if not install_libraries(): print("\nSetup failed: Libs.", file=sys.stderr); sys.exit(1)
+    print(f"\n--- Setup OK ({time.time()-start_time_main:.2f}s) ---")
+    print("\n=== Phase 2: Starting Main App ===")
     run_main_application()
-    print("\n=== Application Finished ===")
+    print(f"\n=== App Finished ({time.time()-start_time_main:.2f}s total) ===")
