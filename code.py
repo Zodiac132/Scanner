@@ -54,7 +54,7 @@ REQUIRED_LIBRARIES = [
 TRIGGER_KEY = '='
 TOGGLE_KEY = 'caps lock'
 SUPPRESS_TRIGGER = True # Prevent '=' from being typed
-AI_MODEL_NAME = "gemini-2.0-flash=lite" # Use the latest flash model
+AI_MODEL_NAME = "gemini-1.5-flash=lite" # Use the latest flash model
 
 # Caps Lock Signaling Config
 SIGNAL_BASE = {'A': 1, 'B': 2, 'C': 3, 'D': 4, 'E': 5, 'F': 6}
