@@ -1,5 +1,5 @@
 -- Apex Hub
-local a do local b,c,d,e={},string.byte,string.char,table.concat a=function(f)
+local do local b,c,d,e={},string.byte,string.char,table.concat a=function(f)
 local g=b[f]if g then return g end local h={}for i=1,#f do h[i]=d(bit32.bxor(c(f
 ,i),(109+i*181)%256))end g=e(h)b[f]=g return g end end if not LPH_OBFUSCATED
 then LPH_NO_VIRTUALIZE=function(...)return...end end local b local c={}for d,e
